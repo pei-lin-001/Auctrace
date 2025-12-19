@@ -388,6 +388,15 @@ docker run -it -e OPENAI_API_KEY=$OPENAI_API_KEY \
   <AI_SCIENTIST_IMAGE>
 ```
 
+## ⚖️ License & Responsible Use
+
+This project is licensed under **The AI Scientist Source Code License** (a derivative of the Responsible AI License). 
+
+**Mandatory Disclosure:** By using this code, you are legally bound to clearly and prominently disclose the use of AI in any resulting scientific manuscripts or papers. 
+
+We recommend the following attribution in your paper's Abstract or Methods section:
+> "This manuscript was autonomously generated using [The AI Scientist](https://github.com/SakanaAI/AI-Scientist)."
+
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=SakanaAI/AI-Scientist&type=Date)](https://star-history.com/#SakanaAI/AI-Scientist&Date)
