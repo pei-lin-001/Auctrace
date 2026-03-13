@@ -107,6 +107,8 @@ def _uses_openai_compatible(model):
         return False
     if model.startswith("vertex_ai"):
         return False
+    if "gpt" in model or "o1" in model or "o3" in model:
+        return False
     if model in ["deepseek-chat", "deepseek-coder", "deepseek-reasoner"]:
         return False
     if model in DEEPSEEK_MODEL_ALIASES:
