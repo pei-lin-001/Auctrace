@@ -78,7 +78,7 @@ pip install -r requirements.txt
 
 ### Supported Models and API Keys
 
-We support a wide variety of models, including open-weight and API-only models. In general, we recommend using only frontier models above the capability of the original GPT-4. To see a full list of supported models, see [here](https://github.com/SakanaAI/AI-Scientist/blob/main/ai_scientist/llm.py).
+We support a wide variety of models, including open-weight and API-only models. Model routing is now string-based rather than backed by a hardcoded catalog: pass the provider-native model ID you want to use. In general, we recommend using only frontier models above the capability of the original GPT-4.
 
 #### OpenAI API (GPT-4o, GPT-4o-mini, o1 models)
 
@@ -93,17 +93,16 @@ export OPENAI_COMPATIBLE_BASE_URL="https://your-endpoint.example/v1"
 export OPENAI_COMPATIBLE_API_KEY="YOUR KEY HERE"
 ```
 
-Then pass any model ID with `--model`, even if it is not listed in `ai_scientist/llm.py`:
+Then pass any model ID with `--model`, or omit `--model` / use `--model auto` to automatically select the first model returned by `/models`:
 
 ```bash
 python launch_scientist.py \
-  --model "Qwen/Qwen2.5-72B-Instruct" \
-  --review-model "Qwen/Qwen2.5-72B-Instruct" \
+  --model auto \
   --experiment nanoGPT_lite \
   --num-ideas 2
 ```
 
-If `OPENAI_COMPATIBLE_API_KEY` is unset, the code falls back to `OPENAI_API_KEY`. The review stage can be configured independently with `--review-model` (or `AI_SCIENTIST_REVIEW_MODEL`).
+If you want to pin a specific model without CLI flags, set `AI_SCIENTIST_MODEL`. If `OPENAI_COMPATIBLE_API_KEY` is unset, the code falls back to `OPENAI_API_KEY`. The review stage can be configured independently with `--review-model` (or `AI_SCIENTIST_REVIEW_MODEL`); if omitted, it reuses the resolved main model.
 
 #### Anthropic API (Claude Sonnet 3.5)
 

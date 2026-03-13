@@ -14,6 +14,7 @@ from datetime import datetime
 
 from ai_scientist.generate_ideas import generate_ideas, check_idea_novelty
 from ai_scientist.llm import create_client, resolve_aider_model_name
+from ai_scientist.openai_compatible import DEFAULT_MODEL_ENV, DEFAULT_REVIEW_MODEL_ENV
 from ai_scientist.perform_experiments import perform_experiments
 from ai_scientist.perform_review import perform_review, load_paper, perform_improvement
 from ai_scientist.perform_writeup import perform_writeup, generate_latex
@@ -47,10 +48,11 @@ def parse_arguments():
     parser.add_argument(
         "--model",
         type=str,
-        default="claude-3-5-sonnet-20240620",
+        default=os.getenv(DEFAULT_MODEL_ENV),
         help=(
-            "Model to use for AI Scientist. Built-in models work directly; any "
-            "model ID also works when OPENAI_COMPATIBLE_BASE_URL is set."
+            "Model to use for AI Scientist. If omitted, AI_SCIENTIST_MODEL is "
+            "used; with OPENAI_COMPATIBLE_BASE_URL you can also omit it or set "
+            "'auto' to select the first model from /models."
         ),
     )
     parser.add_argument(
@@ -93,10 +95,10 @@ def parse_arguments():
     parser.add_argument(
         "--review-model",
         type=str,
-        default=os.getenv("AI_SCIENTIST_REVIEW_MODEL", "gpt-4o-2024-05-13"),
+        default=os.getenv(DEFAULT_REVIEW_MODEL_ENV),
         help=(
-            "Model used for the review stage. Defaults to "
-            "AI_SCIENTIST_REVIEW_MODEL or gpt-4o-2024-05-13."
+            "Model used for the review stage. Defaults to AI_SCIENTIST_REVIEW_MODEL "
+            "or, if unset, the resolved main model."
         ),
     )
     return parser.parse_args()
@@ -140,6 +142,14 @@ def build_coder(model, fnames, io):
         use_git=False,
         edit_format="diff",
     )
+
+
+def resolve_coder_model(model, client_model):
+    if model is None:
+        return client_model
+    if isinstance(model, str) and model.lower() == "auto":
+        return client_model
+    return model
 
 
 def worker(
@@ -224,7 +234,7 @@ def do_idea(
         io = InputOutput(
             yes=True, chat_history_file=f"{folder_name}/{idea_name}_aider.txt"
         )
-        coder = build_coder(model, fnames, io)
+        coder = build_coder(resolve_coder_model(model, client_model), fnames, io)
 
         print_time()
         print(f"*Starting Experiments*")
@@ -245,7 +255,7 @@ def do_idea(
         if writeup == "latex":
             writeup_file = osp.join(folder_name, "latex", "template.tex")
             fnames = [exp_file, writeup_file, notes]
-            coder = build_coder(model, fnames, io)
+            coder = build_coder(resolve_coder_model(model, client_model), fnames, io)
             try:
                 perform_writeup(idea, folder_name, coder, client, client_model, engine=args.engine)
             except Exception as e:
@@ -335,6 +345,7 @@ if __name__ == "__main__":
 
     # Create client
     client, client_model = create_client(args.model)
+    review_model = args.review_model or client_model
 
     base_dir = osp.join("templates", args.experiment)
     results_dir = osp.join("results", args.experiment)
@@ -379,7 +390,7 @@ if __name__ == "__main__":
                     args.model,
                     client,
                     client_model,
-                    args.review_model,
+                    review_model,
                     args.writeup,
                     args.improvement,
                     gpu_id,
@@ -408,7 +419,7 @@ if __name__ == "__main__":
                     args.model,
                     client,
                     client_model,
-                    args.review_model,
+                    review_model,
                     args.writeup,
                     args.improvement,
                 )

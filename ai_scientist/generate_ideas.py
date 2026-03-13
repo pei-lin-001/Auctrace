@@ -8,6 +8,7 @@ import backoff
 import requests
 
 from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client
+from ai_scientist.openai_compatible import DEFAULT_MODEL_ENV
 
 S2_API_KEY = os.getenv("S2_API_KEY")
 
@@ -508,10 +509,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="gpt-4o-2024-05-13",
+        default=os.getenv(DEFAULT_MODEL_ENV),
         help=(
-            "Model to use for AI Scientist. Built-in models work directly; any "
-            "model ID also works when OPENAI_COMPATIBLE_BASE_URL is set."
+            "Model to use for AI Scientist. If omitted, AI_SCIENTIST_MODEL is "
+            "used; with OPENAI_COMPATIBLE_BASE_URL you can also omit it or set "
+            "'auto' to select the first model from /models."
         ),
     )
     parser.add_argument(
