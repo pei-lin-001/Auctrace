@@ -14,6 +14,7 @@ from ai_scientist.llm import (
     create_client,
     resolve_aider_model_name,
 )
+from ai_scientist.openai_compatible import DEFAULT_MODEL_ENV
 
 
 # GENERATE LATEX
@@ -529,10 +530,11 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="gpt-4o-2024-05-13",
+        default=os.getenv(DEFAULT_MODEL_ENV),
         help=(
-            "Model to use for AI Scientist. Built-in models work directly; any "
-            "model ID also works when OPENAI_COMPATIBLE_BASE_URL is set."
+            "Model to use for AI Scientist. If omitted, AI_SCIENTIST_MODEL is "
+            "used; with OPENAI_COMPATIBLE_BASE_URL you can also omit it or set "
+            "'auto' to select the first model from /models."
         ),
     )
     parser.add_argument(
@@ -551,6 +553,7 @@ if __name__ == "__main__":
     vis_file = osp.join(folder_name, "plot.py")
     notes = osp.join(folder_name, "notes.txt")
     model = args.model
+    coder_model = client_model if model in [None, "auto"] else model
     writeup_file = osp.join(folder_name, "latex", "template.tex")
     ideas_file = osp.join(folder_name, "ideas.json")
     with open(ideas_file, "r") as f:
@@ -564,7 +567,7 @@ if __name__ == "__main__":
     fnames = [exp_file, writeup_file, notes]
     io = InputOutput(yes=True, chat_history_file=f"{folder_name}/{idea_name}_aider.txt")
     coder = Coder.create(
-        main_model=Model(resolve_aider_model_name(model)),
+        main_model=Model(resolve_aider_model_name(coder_model)),
         fnames=fnames,
         io=io,
         stream=False,

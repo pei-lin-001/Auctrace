@@ -13,6 +13,7 @@ from ai_scientist.perform_review import (
     neurips_form,
 )
 from ai_scientist.llm import create_client
+from ai_scientist.openai_compatible import DEFAULT_MODEL_ENV
 import pathlib
 import pandas as pd
 import numpy as np
@@ -30,10 +31,11 @@ def parse_arguments():
     parser.add_argument(
         "--model",
         type=str,
-        default="gpt-4o-2024-05-13",
+        default=os.getenv(DEFAULT_MODEL_ENV),
         help=(
-            "Model to use for AI Scientist. Built-in models work directly; any "
-            "model ID also works when OPENAI_COMPATIBLE_BASE_URL is set."
+            "Model to use for AI Scientist. If omitted, AI_SCIENTIST_MODEL is "
+            "used; with OPENAI_COMPATIBLE_BASE_URL you can also omit it or set "
+            "'auto' to select the first model from /models."
         ),
     )
 
