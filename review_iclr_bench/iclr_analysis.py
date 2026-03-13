@@ -12,6 +12,7 @@ from ai_scientist.perform_review import (
     reviewer_system_prompt_neg,
     neurips_form,
 )
+from ai_scientist.llm import create_client
 import pathlib
 import pandas as pd
 import numpy as np
@@ -30,15 +31,10 @@ def parse_arguments():
         "--model",
         type=str,
         default="gpt-4o-2024-05-13",
-        choices=[
-            "gpt-4o-mini-2024-07-18",
-            "gpt-4o-2024-05-13",
-            "gpt-4o-2024-08-06",
-            "llama-3-1-405b-instruct",
-            "deepseek-coder-v2-0724",
-            "claude-3-5-sonnet-20240620",
-        ],
-        help="Model to use for AI Scientist.",
+        help=(
+            "Model to use for AI Scientist. Built-in models work directly; any "
+            "model ID also works when OPENAI_COMPATIBLE_BASE_URL is set."
+        ),
     )
 
     parser.add_argument(
@@ -236,45 +232,7 @@ def review_single_paper(
     review_instruction_form,
     num_paper_pages,
 ):
-    # Setup client for LLM model
-    if model == "claude-3-5-sonnet-20240620":
-        import anthropic
-
-        client = anthropic.Anthropic()
-    elif model.startswith("bedrock") and "claude" in model:
-        import anthropic
-
-        model = model.split("/")[-1]
-        client = anthropic.AnthropicBedrock()
-    elif args.model.startswith("vertex_ai") and "claude" in args.model:
-        import anthropic
-
-        # Expects: vertex_ai/<MODEL_ID>
-        model = args.model.split("/")[-1]
-        client = anthropic.AnthropicVertex()
-    elif model in [
-        "gpt-4o-2024-05-13",
-        "gpt-4o-mini-2024-07-18",
-        "gpt-4o-2024-08-06",
-    ]:
-        import openai
-
-        client = openai.OpenAI()
-    elif model == "deepseek-coder-v2-0724":
-        import openai
-
-        client = openai.OpenAI(
-            api_key=os.environ["DEEPSEEK_API_KEY"], base_url="https://api.deepseek.com"
-        )
-    elif model == "llama-3-1-405b-instruct":
-        import openai
-
-        client = openai.OpenAI(
-            api_key=os.environ["OPENROUTER_API_KEY"],
-            base_url="https://openrouter.ai/api/v1",
-        )
-    else:
-        raise ValueError(f"Model {model} not supported.")
+    client, model = create_client(model)
 
     rating = ore_ratings.iloc[idx]
     if rating.name in llm_ratings.index:

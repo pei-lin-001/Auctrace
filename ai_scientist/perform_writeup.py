@@ -8,7 +8,12 @@ import subprocess
 from typing import Optional, Tuple
 
 from ai_scientist.generate_ideas import search_for_papers
-from ai_scientist.llm import get_response_from_llm, extract_json_between_markers, create_client, AVAILABLE_LLMS
+from ai_scientist.llm import (
+    get_response_from_llm,
+    extract_json_between_markers,
+    create_client,
+    resolve_aider_model_name,
+)
 
 
 # GENERATE LATEX
@@ -525,8 +530,10 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="gpt-4o-2024-05-13",
-        choices=AVAILABLE_LLMS,
-        help="Model to use for AI Scientist.",
+        help=(
+            "Model to use for AI Scientist. Built-in models work directly; any "
+            "model ID also works when OPENAI_COMPATIBLE_BASE_URL is set."
+        ),
     )
     parser.add_argument(
         "--engine",
@@ -556,14 +563,8 @@ if __name__ == "__main__":
         raise ValueError(f"Idea {idea_name} not found")
     fnames = [exp_file, writeup_file, notes]
     io = InputOutput(yes=True, chat_history_file=f"{folder_name}/{idea_name}_aider.txt")
-    if args.model == "deepseek-coder-v2-0724":
-        main_model = Model("deepseek/deepseek-coder")
-    elif args.model == "llama3.1-405b":
-        main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
-    else:
-        main_model = Model(model)
     coder = Coder.create(
-        main_model=main_model,
+        main_model=Model(resolve_aider_model_name(model)),
         fnames=fnames,
         io=io,
         stream=False,

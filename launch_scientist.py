@@ -1,7 +1,6 @@
 import argparse
 import json
 import multiprocessing
-import openai
 import os
 import os.path as osp
 import shutil
@@ -14,7 +13,7 @@ from aider.models import Model
 from datetime import datetime
 
 from ai_scientist.generate_ideas import generate_ideas, check_idea_novelty
-from ai_scientist.llm import create_client, AVAILABLE_LLMS
+from ai_scientist.llm import create_client, resolve_aider_model_name
 from ai_scientist.perform_experiments import perform_experiments
 from ai_scientist.perform_review import perform_review, load_paper, perform_improvement
 from ai_scientist.perform_writeup import perform_writeup, generate_latex
@@ -49,8 +48,10 @@ def parse_arguments():
         "--model",
         type=str,
         default="claude-3-5-sonnet-20240620",
-        choices=AVAILABLE_LLMS,
-        help="Model to use for AI Scientist.",
+        help=(
+            "Model to use for AI Scientist. Built-in models work directly; any "
+            "model ID also works when OPENAI_COMPATIBLE_BASE_URL is set."
+        ),
     )
     parser.add_argument(
         "--writeup",
@@ -89,6 +90,15 @@ def parse_arguments():
         choices=["semanticscholar", "openalex"],
         help="Scholar engine to use.",
     )
+    parser.add_argument(
+        "--review-model",
+        type=str,
+        default=os.getenv("AI_SCIENTIST_REVIEW_MODEL", "gpt-4o-2024-05-13"),
+        help=(
+            "Model used for the review stage. Defaults to "
+            "AI_SCIENTIST_REVIEW_MODEL or gpt-4o-2024-05-13."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -118,7 +128,20 @@ def check_latex_dependencies():
         return False
     
     return True
-    
+
+
+def build_coder(model, fnames, io):
+    aider_model = resolve_aider_model_name(model)
+    return Coder.create(
+        main_model=Model(aider_model),
+        fnames=fnames,
+        io=io,
+        stream=False,
+        use_git=False,
+        edit_format="diff",
+    )
+
+
 def worker(
         queue,
         base_dir,
@@ -126,6 +149,7 @@ def worker(
         model,
         client,
         client_model,
+        review_model,
         writeup,
         improvement,
         gpu_id,
@@ -143,6 +167,7 @@ def worker(
             model,
             client,
             client_model,
+            review_model,
             writeup,
             improvement,
             log_file=True,
@@ -158,6 +183,7 @@ def do_idea(
         model,
         client,
         client_model,
+        review_model,
         writeup,
         improvement,
         log_file=False,
@@ -198,22 +224,7 @@ def do_idea(
         io = InputOutput(
             yes=True, chat_history_file=f"{folder_name}/{idea_name}_aider.txt"
         )
-        if model == "deepseek-coder-v2-0724":
-            main_model = Model("deepseek/deepseek-coder")
-        elif model == "deepseek-reasoner":
-            main_model = Model("deepseek/deepseek-reasoner")
-        elif model == "llama3.1-405b":
-            main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
-        else:
-            main_model = Model(model)
-        coder = Coder.create(
-            main_model=main_model,
-            fnames=fnames,
-            io=io,
-            stream=False,
-            use_git=False,
-            edit_format="diff",
-        )
+        coder = build_coder(model, fnames, io)
 
         print_time()
         print(f"*Starting Experiments*")
@@ -234,22 +245,7 @@ def do_idea(
         if writeup == "latex":
             writeup_file = osp.join(folder_name, "latex", "template.tex")
             fnames = [exp_file, writeup_file, notes]
-            if model == "deepseek-coder-v2-0724":
-                main_model = Model("deepseek/deepseek-coder")
-            elif model == "deepseek-reasoner":
-                main_model = Model("deepseek/deepseek-reasoner")
-            elif model == "llama3.1-405b":
-                main_model = Model("openrouter/meta-llama/llama-3.1-405b-instruct")
-            else:
-                main_model = Model(model)
-            coder = Coder.create(
-                main_model=main_model,
-                fnames=fnames,
-                io=io,
-                stream=False,
-                use_git=False,
-                edit_format="diff",
-            )
+            coder = build_coder(model, fnames, io)
             try:
                 perform_writeup(idea, folder_name, coder, client, client_model, engine=args.engine)
             except Exception as e:
@@ -265,10 +261,11 @@ def do_idea(
         if writeup == "latex":
             try:
                 paper_text = load_paper(f"{folder_name}/{idea['Name']}.pdf")
+                review_client, review_client_model = create_client(review_model)
                 review = perform_review(
                     paper_text,
-                    model="gpt-4o-2024-05-13",
-                    client=openai.OpenAI(),
+                    model=review_client_model,
+                    client=review_client,
                     num_reflections=5,
                     num_fs_examples=1,
                     num_reviews_ensemble=5,
@@ -291,10 +288,11 @@ def do_idea(
                     coder, folder_name, f"{folder_name}/{idea['Name']}_improved.pdf"
                 )
                 paper_text = load_paper(f"{folder_name}/{idea['Name']}_improved.pdf")
+                review_client, review_client_model = create_client(review_model)
                 review = perform_review(
                     paper_text,
-                    model="gpt-4o-2024-05-13",
-                    client=openai.OpenAI(),
+                    model=review_client_model,
+                    client=review_client,
                     num_reflections=5,
                     num_fs_examples=1,
                     num_reviews_ensemble=5,
@@ -381,6 +379,7 @@ if __name__ == "__main__":
                     args.model,
                     client,
                     client_model,
+                    args.review_model,
                     args.writeup,
                     args.improvement,
                     gpu_id,
@@ -409,6 +408,7 @@ if __name__ == "__main__":
                     args.model,
                     client,
                     client_model,
+                    args.review_model,
                     args.writeup,
                     args.improvement,
                 )

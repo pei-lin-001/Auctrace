@@ -9,6 +9,25 @@ import google.generativeai as genai
 from google.generativeai.types import GenerationConfig
 
 MAX_NUM_TOKENS = 4096
+OPENAI_COMPATIBLE_BASE_URL_ENV = "OPENAI_COMPATIBLE_BASE_URL"
+OPENAI_COMPATIBLE_API_KEY_ENV = "OPENAI_COMPATIBLE_API_KEY"
+AIDER_OPENAI_API_BASE_ENV = "AIDER_OPENAI_API_BASE"
+AIDER_OPENAI_API_KEY_ENV = "AIDER_OPENAI_API_KEY"
+OPENAI_PROVIDER = "openai"
+OPENAI_COMPATIBLE_PROVIDER = "openai-compatible"
+ANTHROPIC_PROVIDER = "anthropic"
+DEEPSEEK_PROVIDER = "deepseek"
+OPENROUTER_PROVIDER = "openrouter"
+GEMINI_PROVIDER = "gemini"
+
+DEEPSEEK_MODEL_ALIASES = {
+    "deepseek-coder-v2-0724": "deepseek-coder",
+}
+
+OPENROUTER_MODEL_ALIASES = {
+    "llama3.1-405b": "meta-llama/llama-3.1-405b-instruct",
+    "llama-3-1-405b-instruct": "meta-llama/llama-3.1-405b-instruct",
+}
 
 AVAILABLE_LLMS = [
     # Anthropic models
@@ -51,6 +70,7 @@ AVAILABLE_LLMS = [
     "deepseek-chat",
     "deepseek-coder",
     "deepseek-reasoner",
+    "deepseek-coder-v2-0724",
     # Google Gemini models
     "gemini-1.5-flash",
     "gemini-1.5-pro",
@@ -59,7 +79,91 @@ AVAILABLE_LLMS = [
     "gemini-2.0-flash-thinking-exp-01-21",
     "gemini-2.5-pro-preview-03-25",
     "gemini-2.5-pro-exp-03-25",
+    "llama-3-1-405b-instruct",
 ]
+
+
+def _tag_client(client, provider):
+    setattr(client, "_ai_scientist_provider", provider)
+    return client
+
+
+def _get_openai_compatible_settings():
+    base_url = os.getenv(OPENAI_COMPATIBLE_BASE_URL_ENV)
+    if not base_url:
+        return None
+
+    api_key = os.getenv(OPENAI_COMPATIBLE_API_KEY_ENV) or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError(
+            f"{OPENAI_COMPATIBLE_BASE_URL_ENV} is set, but neither "
+            f"{OPENAI_COMPATIBLE_API_KEY_ENV} nor OPENAI_API_KEY is available."
+        )
+    return {"api_key": api_key, "base_url": base_url}
+
+
+def _uses_openai_compatible(model):
+    if model.startswith("claude-") or model.startswith("bedrock"):
+        return False
+    if model.startswith("vertex_ai"):
+        return False
+    if model in ["deepseek-chat", "deepseek-coder", "deepseek-reasoner"]:
+        return False
+    if model in DEEPSEEK_MODEL_ALIASES:
+        return False
+    if model in OPENROUTER_MODEL_ALIASES:
+        return False
+    if "gemini" in model:
+        return False
+    return os.getenv(OPENAI_COMPATIBLE_BASE_URL_ENV) is not None
+
+
+def _configure_aider_openai_compatible(model):
+    if not _uses_openai_compatible(model):
+        return
+    settings = _get_openai_compatible_settings()
+    os.environ[AIDER_OPENAI_API_BASE_ENV] = settings["base_url"]
+    os.environ[AIDER_OPENAI_API_KEY_ENV] = settings["api_key"]
+
+
+def resolve_aider_model_name(model):
+    if model in DEEPSEEK_MODEL_ALIASES:
+        return f"deepseek/{DEEPSEEK_MODEL_ALIASES[model]}"
+    if model == "deepseek-reasoner":
+        return "deepseek/deepseek-reasoner"
+    if model in OPENROUTER_MODEL_ALIASES:
+        return f"openrouter/{OPENROUTER_MODEL_ALIASES[model]}"
+    if _uses_openai_compatible(model):
+        _configure_aider_openai_compatible(model)
+        return f"openai/{model}"
+    return model
+
+
+def _get_api_style(client, model):
+    provider = getattr(client, "_ai_scientist_provider", None)
+    if provider == ANTHROPIC_PROVIDER or model.startswith("claude-"):
+        return ANTHROPIC_PROVIDER
+    if "o1" in model or "o3" in model:
+        return "openai-reasoning"
+    if model == "deepseek-reasoner":
+        return "deepseek-reasoner"
+    if provider in {
+        OPENAI_PROVIDER,
+        OPENAI_COMPATIBLE_PROVIDER,
+        DEEPSEEK_PROVIDER,
+        OPENROUTER_PROVIDER,
+        GEMINI_PROVIDER,
+    }:
+        return "openai-chat"
+    raise ValueError(f"Model {model} is not mapped to a supported API style.")
+
+
+def _resolve_api_model_name(model):
+    if model in DEEPSEEK_MODEL_ALIASES:
+        return DEEPSEEK_MODEL_ALIASES[model]
+    if model in OPENROUTER_MODEL_ALIASES:
+        return OPENROUTER_MODEL_ALIASES[model]
+    return model
 
 
 # Get N responses from a single message, used for ensembling.
@@ -77,10 +181,13 @@ def get_batch_responses_from_llm(
     if msg_history is None:
         msg_history = []
 
-    if 'gpt' in model:
+    api_style = _get_api_style(client, model)
+    request_model = _resolve_api_model_name(model)
+
+    if api_style == "openai-chat":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
-            model=model,
+            model=request_model,
             messages=[
                 {"role": "system", "content": system_message},
                 *new_msg_history,
@@ -90,23 +197,6 @@ def get_batch_responses_from_llm(
             n=n_responses,
             stop=None,
             seed=0,
-        )
-        content = [r.message.content for r in response.choices]
-        new_msg_history = [
-            new_msg_history + [{"role": "assistant", "content": c}] for c in content
-        ]
-    elif model == "llama-3-1-405b-instruct":
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model="meta-llama/llama-3.1-405b-instruct",
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-            n=n_responses,
-            stop=None,
         )
         content = [r.message.content for r in response.choices]
         new_msg_history = [
@@ -152,7 +242,10 @@ def get_response_from_llm(
     if msg_history is None:
         msg_history = []
 
-    if "claude" in model:
+    api_style = _get_api_style(client, model)
+    request_model = _resolve_api_model_name(model)
+
+    if api_style == ANTHROPIC_PROVIDER:
         new_msg_history = msg_history + [
             {
                 "role": "user",
@@ -165,7 +258,7 @@ def get_response_from_llm(
             }
         ]
         response = client.messages.create(
-            model=model,
+            model=request_model,
             max_tokens=MAX_NUM_TOKENS,
             temperature=temperature,
             system=system_message,
@@ -183,10 +276,10 @@ def get_response_from_llm(
                 ],
             }
         ]
-    elif 'gpt' in model:
+    elif api_style == "openai-chat":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
-            model=model,
+            model=request_model,
             messages=[
                 {"role": "system", "content": system_message},
                 *new_msg_history,
@@ -199,10 +292,10 @@ def get_response_from_llm(
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif "o1" in model or "o3" in model:
+    elif api_style == "openai-reasoning":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
-            model=model,
+            model=request_model,
             messages=[
                 {"role": "user", "content": system_message},
                 *new_msg_history,
@@ -214,60 +307,16 @@ def get_response_from_llm(
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model in ["meta-llama/llama-3.1-405b-instruct", "llama-3-1-405b-instruct"]:
+    elif api_style == "deepseek-reasoner":
         new_msg_history = msg_history + [{"role": "user", "content": msg}]
         response = client.chat.completions.create(
-            model="meta-llama/llama-3.1-405b-instruct",
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-            n=1,
-            stop=None,
-        )
-        content = response.choices[0].message.content
-        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model in ["deepseek-chat", "deepseek-coder"]:
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-            n=1,
-            stop=None,
-        )
-        content = response.choices[0].message.content
-        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif model in ["deepseek-reasoner"]:
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model=model,
+            model=request_model,
             messages=[
                 {"role": "system", "content": system_message},
                 *new_msg_history,
             ],
             n=1,
             stop=None,
-        )
-        content = response.choices[0].message.content
-        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    elif "gemini" in model:
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-            n=1,
         )
         content = response.choices[0].message.content
         new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
@@ -317,35 +366,61 @@ def extract_json_between_markers(llm_output):
 def create_client(model):
     if model.startswith("claude-"):
         print(f"Using Anthropic API with model {model}.")
-        return anthropic.Anthropic(), model
+        return _tag_client(anthropic.Anthropic(), ANTHROPIC_PROVIDER), model
     elif model.startswith("bedrock") and "claude" in model:
         client_model = model.split("/")[-1]
         print(f"Using Amazon Bedrock with model {client_model}.")
-        return anthropic.AnthropicBedrock(), client_model
+        return _tag_client(anthropic.AnthropicBedrock(), ANTHROPIC_PROVIDER), client_model
     elif model.startswith("vertex_ai") and "claude" in model:
         client_model = model.split("/")[-1]
         print(f"Using Vertex AI with model {client_model}.")
-        return anthropic.AnthropicVertex(), client_model
+        return _tag_client(anthropic.AnthropicVertex(), ANTHROPIC_PROVIDER), client_model
+    elif model in ["deepseek-chat", "deepseek-reasoner", "deepseek-coder"]:
+        print(f"Using DeepSeek API with model {model}.")
+        client = openai.OpenAI(
+            api_key=os.environ["DEEPSEEK_API_KEY"],
+            base_url="https://api.deepseek.com",
+        )
+        return _tag_client(client, DEEPSEEK_PROVIDER), model
+    elif model in DEEPSEEK_MODEL_ALIASES:
+        client_model = DEEPSEEK_MODEL_ALIASES[model]
+        print(f"Using DeepSeek API with model {client_model} (requested {model}).")
+        client = openai.OpenAI(
+            api_key=os.environ["DEEPSEEK_API_KEY"],
+            base_url="https://api.deepseek.com",
+        )
+        return _tag_client(client, DEEPSEEK_PROVIDER), client_model
+    elif model in OPENROUTER_MODEL_ALIASES:
+        client_model = OPENROUTER_MODEL_ALIASES[model]
+        print(f"Using OpenRouter API with model {client_model}.")
+        client = openai.OpenAI(
+            api_key=os.environ["OPENROUTER_API_KEY"],
+            base_url="https://openrouter.ai/api/v1",
+        )
+        return _tag_client(client, OPENROUTER_PROVIDER), client_model
+    elif "gemini" in model:
+        print(f"Using Gemini OpenAI endpoint with model {model}.")
+        client = openai.OpenAI(
+            api_key=os.environ["GEMINI_API_KEY"],
+            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        )
+        return _tag_client(client, GEMINI_PROVIDER), model
+    elif _uses_openai_compatible(model):
+        settings = _get_openai_compatible_settings()
+        print(
+            f"Using OpenAI-compatible API with model {model} via "
+            f"{settings['base_url']}."
+        )
+        client = openai.OpenAI(
+            api_key=settings["api_key"],
+            base_url=settings["base_url"],
+        )
+        return _tag_client(client, OPENAI_COMPATIBLE_PROVIDER), model
     elif 'gpt' in model or "o1" in model or "o3" in model:
         print(f"Using OpenAI API with model {model}.")
-        return openai.OpenAI(), model
-    elif model in ["deepseek-chat", "deepseek-reasoner", "deepseek-coder"]:
-        print(f"Using OpenAI API with {model}.")
-        return openai.OpenAI(
-            api_key=os.environ["DEEPSEEK_API_KEY"],
-            base_url="https://api.deepseek.com"
-        ), model
-    elif model == "llama3.1-405b":
-        print(f"Using OpenAI API with {model}.")
-        return openai.OpenAI(
-            api_key=os.environ["OPENROUTER_API_KEY"],
-            base_url="https://openrouter.ai/api/v1"
-        ), "meta-llama/llama-3.1-405b-instruct"
-    elif "gemini" in model:
-        print(f"Using OpenAI API with {model}.")
-        return openai.OpenAI(
-            api_key=os.environ["GEMINI_API_KEY"],
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/"
-        ), model
+        return _tag_client(openai.OpenAI(), OPENAI_PROVIDER), model
     else:
-        raise ValueError(f"Model {model} not supported.")
+        raise ValueError(
+            f"Model {model} not supported. Set {OPENAI_COMPATIBLE_BASE_URL_ENV} "
+            "to use an arbitrary OpenAI-compatible model."
+        )

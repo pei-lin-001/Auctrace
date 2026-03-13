@@ -84,6 +84,27 @@ We support a wide variety of models, including open-weight and API-only models. 
 
 By default, this uses the `OPENAI_API_KEY` environment variable.
 
+#### OpenAI-Compatible API
+
+You can also point the project at any OpenAI-compatible endpoint (for example vLLM, local gateways, or vendor-compatible proxies). Set:
+
+```bash
+export OPENAI_COMPATIBLE_BASE_URL="https://your-endpoint.example/v1"
+export OPENAI_COMPATIBLE_API_KEY="YOUR KEY HERE"
+```
+
+Then pass any model ID with `--model`, even if it is not listed in `ai_scientist/llm.py`:
+
+```bash
+python launch_scientist.py \
+  --model "Qwen/Qwen2.5-72B-Instruct" \
+  --review-model "Qwen/Qwen2.5-72B-Instruct" \
+  --experiment nanoGPT_lite \
+  --num-ideas 2
+```
+
+If `OPENAI_COMPATIBLE_API_KEY` is unset, the code falls back to `OPENAI_API_KEY`. The review stage can be configured independently with `--review-model` (or `AI_SCIENTIST_REVIEW_MODEL`).
+
 #### Anthropic API (Claude Sonnet 3.5)
 
 By default, this uses the `ANTHROPIC_API_KEY` environment variable.
@@ -248,11 +269,11 @@ If you have more than one GPU, use the `--parallel` option to parallelize ideas 
 ## Getting an LLM-Generated Paper Review
 
 ```python
-import openai
 from ai_scientist.perform_review import load_paper, perform_review
+from ai_scientist.llm import create_client
 
-client = openai.OpenAI()
 model = "gpt-4o-2024-05-13"
+client, model = create_client(model)
 
 # Load paper from PDF file (raw text)
 paper_txt = load_paper("report.pdf")
