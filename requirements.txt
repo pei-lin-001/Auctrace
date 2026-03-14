@@ -1,18 +1,29 @@
 # LLM APIs
 anthropic
-aider-chat
 backoff
 openai
-google-generativeai
 # Viz
 matplotlib
 pypdf
 pymupdf4llm
+seaborn
 # Common Requirements
-torch
 numpy
 transformers
 datasets
 tiktoken
 wandb
 tqdm
+rich
+humanize
+dataclasses-json
+funcy
+black
+genson
+shutup
+python-igraph
+coolname
+jsonschema
+omegaconf
+botocore
+boto3
