@@ -9,7 +9,6 @@ import openai
 from ai_scientist.openai_compatible import (
     OPENAI_COMPATIBLE_BASE_URL_ENV,
     configure_aider_openai_compatible,
-    ensure_model_available,
     get_openai_compatible_settings,
     is_model_available_via_openai_compatible,
     resolve_requested_model,
@@ -42,7 +41,11 @@ def _is_deepseek_model(model):
 def _is_gemini_model(model):
     return model.startswith("gemini")
 def _should_use_openai_compatible(model):
+    if _is_anthropic_model(model):
+        return False
     if _is_bedrock_claude_model(model) or _is_vertex_claude_model(model):
+        return False
+    if _is_openai_native_model(model):
         return False
     if _is_openrouter_model(model):
         return False
@@ -56,7 +59,6 @@ def _strip_provider_prefix(model):
 def resolve_aider_model_name(model):
     resolved_model = resolve_requested_model(model)
     if _should_use_openai_compatible(resolved_model):
-        ensure_model_available(resolved_model)
         configure_aider_openai_compatible()
         return f"openai/{resolved_model}"
     if _is_deepseek_model(resolved_model):
@@ -239,7 +241,6 @@ def create_client(model):
         return _tag_client(client, OPENROUTER_PROVIDER), client_model
     if _should_use_openai_compatible(resolved_model):
         settings = get_openai_compatible_settings()
-        ensure_model_available(resolved_model)
         print(
             f"Using OpenAI-compatible API with model {resolved_model} via "
             f"{settings['base_url']}."
