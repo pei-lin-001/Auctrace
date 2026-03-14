@@ -174,3 +174,4 @@ templates/*/*.png
 results/*
 /AGENTS.md
 /CLAUDE.md
+/.claude/
