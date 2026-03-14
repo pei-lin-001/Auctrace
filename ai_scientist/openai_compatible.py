@@ -52,7 +52,9 @@ def _fetch_model_ids_once(base_url, api_key):
             "OpenAI-compatible /models response is invalid: expected a top-level "
             "'data' array."
         )
-    model_ids = [getattr(item, "id", "").strip() for item in data if getattr(item, "id", None)]
+    model_ids = [
+        getattr(item, "id", "").strip() for item in data if getattr(item, "id", None)
+    ]
     if not model_ids:
         raise ValueError("OpenAI-compatible /models returned no model IDs.")
     return tuple(model_ids)
@@ -80,8 +82,7 @@ def resolve_openai_compatible_base_url(base_url, api_key):
 
 @lru_cache(maxsize=8)
 def _fetch_model_ids(base_url, api_key):
-    resolved_base_url = resolve_openai_compatible_base_url(base_url, api_key)
-    return _fetch_model_ids_once(resolved_base_url, api_key)
+    return _fetch_model_ids_once(base_url, api_key)
 
 
 def fetch_openai_compatible_model_ids():
