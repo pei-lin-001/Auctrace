@@ -66,6 +66,26 @@ Installation usually takes no more than one hour.
 
 By default, the system uses the `OPENAI_API_KEY` environment variable for OpenAI models.
 
+#### OpenAI-compatible Models
+
+The repository now supports **arbitrary OpenAI-compatible model names** across the v2 experiment path, ideation, plotting, writeup, LLM review, and VLM review.
+
+Set either:
+
+```bash
+export OPENAI_BASE_URL="https://your-compatible-endpoint/v1"
+export OPENAI_API_KEY="YOUR_COMPATIBLE_KEY"
+```
+
+or the explicit aliases:
+
+```bash
+export OPENAI_COMPATIBLE_BASE_URL="https://your-compatible-endpoint/v1"
+export OPENAI_COMPATIBLE_API_KEY="YOUR_COMPATIBLE_KEY"
+```
+
+When a compatible base URL is configured, plain model names such as `Qwen/Qwen3-32B`, `meta-llama/llama-3.1-70b-instruct`, or even compatible `claude-*` names are routed through the OpenAI-compatible endpoint instead of the hardcoded native provider routes.
+
 #### Gemini Models
 
 By default, the system uses the `GEMINI_API_KEY` environment variable for Gemini models through OpenAI API.
@@ -87,6 +107,7 @@ Our code can optionally use a Semantic Scholar API Key (`S2_API_KEY`) for higher
 Ensure you provide the necessary API keys as environment variables for the models you intend to use. For example:
 ```bash
 export OPENAI_API_KEY="YOUR_OPENAI_KEY_HERE"
+export OPENAI_BASE_URL="https://your-compatible-endpoint/v1"  # optional, for OpenAI-compatible APIs
 export S2_API_KEY="YOUR_S2_KEY_HERE"
 # Set AWS credentials if using Bedrock
 # export AWS_ACCESS_KEY_ID="YOUR_AWS_ACCESS_KEY_ID"
@@ -110,7 +131,7 @@ Before running the full AI Scientist-v2 experiment pipeline, you first use the `
      --num-reflections 5
     ```
     *   `--workshop-file`: Path to your topic description Markdown file.
-    *   `--model`: The LLM to use for generating ideas (ensure you have the corresponding API key set).
+    *   `--model`: The LLM to use for generating ideas. This can now be any supported native model or any OpenAI-compatible model name when `OPENAI_BASE_URL` is configured.
     *   `--max-num-generations`: How many distinct research ideas to attempt generating.
     *   `--num-reflections`: How many refinement steps the LLM should perform for each idea.
 
@@ -126,6 +147,8 @@ Using the JSON file generated in the previous ideation step, you can now launch 
 
 Specify the models used for the write-up and review phases via command-line arguments.
 The configuration for the best-first tree search (BFTS) is located in `bfts_config.yaml`. Adjust parameters in this file as needed.
+
+All OpenAI-style stages in this repository now accept arbitrary model strings when `OPENAI_BASE_URL` or `OPENAI_COMPATIBLE_BASE_URL` is configured, so you are no longer limited to the previously hardcoded model list for ideation or writeup.
 
 Key tree search configuration parameters in `bfts_config.yaml`:
 
@@ -155,6 +178,59 @@ python launch_scientist_bfts.py \
 Once the initial experimental stage is complete, you will find a timestamped log folder inside the `experiments/` directory. Navigate to `experiments/"timestamp_ideaname"/logs/0-run/` within that folder to find the tree visualization file `unified_tree_viz.html`.
 After all experiment stages are complete, the writeup stage begins. The writeup stage typically takes about 20 to 30 minutes in total. Once it finishes, you should see `timestamp_ideaname.pdf` in the `timestamp_ideaname` folder.
 For this example run, all stages typically finish within several hours.
+
+## Run Experiments on Vast.ai
+
+This repository now includes a **Vast.ai execution backend** for the v2 tree-search pipeline. It is intended to replace the assumption that experiments must run on the local machine's CUDA-visible GPUs.
+
+The integration uses Vast.ai's official instance APIs to:
+
+- search rentable offers,
+- create or reuse an instance,
+- attach a real local SSH public key to the rented instance,
+- verify that the instance is not only `running` but also passes a real SSH health probe,
+- execute experiment workers remotely over SSH,
+- automatically destroy the rented instance when the run finishes,
+- and replace bad or unresponsive low-cost offers instead of silently hanging forever.
+
+### Required environment variables
+
+```bash
+export VAST_API_KEY="YOUR_VAST_API_KEY"
+export VAST_SSH_PRIVATE_KEY_PATH="$HOME/.ssh/id_ed25519"
+export VAST_SSH_PUBLIC_KEY_PATH="$HOME/.ssh/id_ed25519.pub"
+```
+
+If the environment variables are omitted, the backend will explicitly look for a local keypair in `~/.ssh/id_ed25519(.pub)` and then `~/.ssh/id_rsa(.pub)`. Vast.ai account-side key labels alone are not enough for unattended remote execution; the backend must have access to a real local public key to attach and, unless you rely on `ssh-agent`, the matching private key for the health probe and remote execution.
+
+### Enable the backend
+
+Edit [bfts_config.yaml](./bfts_config.yaml) and set:
+
+```yaml
+exec:
+  backend: vast
+```
+
+Key Vast.ai options live under `exec.vast`, including:
+
+- `existing_instance_id`: reuse an existing instance instead of auto-renting
+- `offer_id`: force a specific offer ID during debugging or deterministic testing
+- `image`: Docker image used when creating the instance
+- `runtype`: defaults to `ssh_direct`
+- `max_provision_attempts`: how many low-cost offers to try before failing
+- `instance_poll_interval`: polling interval while waiting for the instance to boot
+- `ssh_probe_*`: retries and timeouts for the explicit SSH health check
+- `search.*`: offer filtering such as `num_gpus`, `reliability_min`, and `direct_port_count_min`
+- `setup_commands`: optional one-time remote setup commands
+- `auto_destroy`: whether to destroy the instance on cleanup
+
+### Notes
+
+- The remote execution path syncs each worker workspace to the Vast.ai instance, runs the generated code remotely, then syncs artifacts back to the local `experiments/` directory.
+- The integration assumes your chosen Vast.ai image already contains the scientific Python stack you need, or that you provide it through `setup_commands`.
+- The backend treats the **lowest-cost healthy** offer as the target. If an offer boots into a broken host state, never exposes a usable SSH banner, or closes SSH during key exchange, that instance is destroyed and the next low-cost offer is tried explicitly.
+- If a required package is missing remotely, the run will fail explicitly rather than silently falling back to local execution.
 
 ## Citing The AI Scientist-v2
 

@@ -6,6 +6,7 @@ from .utils import FunctionSpec, OutputType, opt_messages_to_list, backoff_creat
 from funcy import notnone, once, select_values
 import openai
 from rich import print
+from ai_scientist.openai_compatible import create_openai_client, is_openai_reasoning_model
 
 logger = logging.getLogger("ai-scientist")
 
@@ -18,14 +19,8 @@ OPENAI_TIMEOUT_EXCEPTIONS = (
 )
 
 def get_ai_client(model: str, max_retries=2) -> openai.OpenAI:
-    if model.startswith("ollama/"):
-        client = openai.OpenAI(
-            base_url="http://localhost:11434/v1", 
-            max_retries=max_retries
-        )
-    else:
-        client = openai.OpenAI(max_retries=max_retries)
-    return client
+    spec = create_openai_client(model, max_retries=max_retries)
+    return spec.client
 
 
 def query(
@@ -34,8 +29,10 @@ def query(
     func_spec: FunctionSpec | None = None,
     **model_kwargs,
 ) -> tuple[OutputType, float, int, int, dict]:
-    client = get_ai_client(model_kwargs.get("model"), max_retries=0)
+    spec = create_openai_client(model_kwargs.get("model"), max_retries=0)
+    client = spec.client
     filtered_kwargs: dict = select_values(notnone, model_kwargs)  # type: ignore
+    filtered_kwargs["model"] = spec.model
 
     messages = opt_messages_to_list(system_message, user_message)
 
@@ -44,8 +41,11 @@ def query(
         # force the model to use the function
         filtered_kwargs["tool_choice"] = func_spec.openai_tool_choice_dict
 
-    if filtered_kwargs.get("model", "").startswith("ollama/"):
-       filtered_kwargs["model"] = filtered_kwargs["model"].replace("ollama/", "")
+    if is_openai_reasoning_model(spec.model):
+        if system_message is not None:
+            messages = opt_messages_to_list(None, f"{system_message}\n\n{user_message or ''}".strip())
+        filtered_kwargs.pop("temperature", None)
+        filtered_kwargs.pop("max_tokens", None)
 
     t0 = time.time()
     completion = backoff_create(

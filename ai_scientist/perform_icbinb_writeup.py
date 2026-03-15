@@ -14,7 +14,6 @@ from ai_scientist.llm import (
     get_response_from_llm,
     extract_json_between_markers,
     create_client,
-    AVAILABLE_LLMS,
 )
 
 from ai_scientist.utils.token_tracker import track_token_usage
@@ -1251,15 +1250,13 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
-        choices=AVAILABLE_LLMS,
-        help="Model to use for citation collection (small model).",
+        help="Model to use for citation collection (small model). Supports arbitrary OpenAI-compatible model names.",
     )
     parser.add_argument(
         "--big-model",
         type=str,
         default="o1-2024-12-17",
-        choices=AVAILABLE_LLMS,
-        help="Model to use for final writeup (big model).",
+        help="Model to use for final writeup (big model). Supports arbitrary OpenAI-compatible model names.",
     )
     parser.add_argument(
         "--writeup-reflections",

@@ -17,6 +17,8 @@ import copy
 import pickle
 from dataclasses import asdict
 from omegaconf import OmegaConf
+from .execution_backends import create_interpreter
+from .vast_api import cleanup_vast_runtime, prepare_vast_runtime
 
 from rich import print
 from pathlib import Path
@@ -1166,12 +1168,22 @@ class ParallelAgent:
         )
         self.data_preview = None
         self.num_workers = cfg.agent.num_workers
-        self.num_gpus = get_gpu_count()
-        print(f"num_gpus: {self.num_gpus}")
-        if self.num_gpus == 0:
-            print("No GPUs detected, falling back to CPU-only mode")
+        self.exec_backend = getattr(cfg.exec, "backend", "local")
+        if self.exec_backend == "vast":
+            runtime = prepare_vast_runtime(self.cfg.exec, self.cfg.exp_name)
+            self.num_gpus = runtime.num_gpus
+            print(
+                f"Using Vast.ai instance {runtime.instance_id} at "
+                f"{runtime.ssh_host}:{runtime.ssh_port} with {runtime.num_gpus} GPU(s); "
+                f"offer={runtime.offer_id}, machine={runtime.machine_id}"
+            )
         else:
-            print(f"Detected {self.num_gpus} GPUs")
+            self.num_gpus = get_gpu_count()
+            print(f"num_gpus: {self.num_gpus}")
+            if self.num_gpus == 0:
+                print("No GPUs detected, falling back to CPU-only mode")
+            else:
+                print(f"Detected {self.num_gpus} GPUs")
 
         self.gpu_manager = GPUManager(self.num_gpus) if self.num_gpus > 0 else None
 
@@ -1333,8 +1345,6 @@ class ParallelAgent:
         """Generate an aggregation node for seed evaluation results"""
         if seed_nodes:
             try:
-                from .interpreter import Interpreter
-
                 # Create aggregation plotting code
                 agg_plotting_code = self._aggregate_seed_eval_results(seed_nodes, node)
 
@@ -1346,11 +1356,9 @@ class ParallelAgent:
 
                 # Execute aggregation plotting code
                 print("[blue]Creating Interpreter for seed node aggregation[/blue]")
-                process_interpreter = Interpreter(
+                process_interpreter = create_interpreter(
+                    self.cfg,
                     working_dir=self.cfg.workspace_dir,
-                    timeout=self.cfg.exec.timeout,
-                    format_tb_ipython=self.cfg.exec.format_tb_ipython,
-                    agent_file_name=self.cfg.exec.agent_file_name,
                     env_vars={"AI_SCIENTIST_ROOT": os.getenv("AI_SCIENTIST_ROOT")},
                 )
 
@@ -1423,7 +1431,6 @@ class ParallelAgent:
         seed_eval=False,
     ):
         """Wrapper function that creates a fresh environment for each process"""
-        from .interpreter import Interpreter
         from .journal import Node, Journal
         from copy import deepcopy
         import os
@@ -1458,11 +1465,10 @@ class ParallelAgent:
 
         # Create interpreter instance for worker process
         print("Creating Interpreter")
-        process_interpreter = Interpreter(
+        process_interpreter = create_interpreter(
+            cfg,
             working_dir=workspace,
-            timeout=cfg.exec.timeout,
-            format_tb_ipython=cfg.exec.format_tb_ipython,
-            agent_file_name=cfg.exec.agent_file_name,
+            gpu_id=gpu_id,
         )
 
         try:
@@ -2362,6 +2368,11 @@ class ParallelAgent:
             except Exception as e:
                 print(f"Error during executor shutdown: {e}")
             finally:
+                if self.exec_backend == "vast":
+                    try:
+                        cleanup_vast_runtime(self.cfg.exec)
+                    except Exception as e:
+                        print(f"Error destroying Vast.ai instance: {e}")
                 self._is_shutdown = True
 
     def __exit__(self, exc_type, exc_val, exc_tb):

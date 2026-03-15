@@ -7,6 +7,11 @@ import openai
 import os
 from PIL import Image
 from ai_scientist.utils.token_tracker import track_token_usage
+from ai_scientist.openai_compatible import (
+    create_openai_client,
+    is_explicit_anthropic_model,
+    is_openai_reasoning_model,
+)
 
 MAX_NUM_TOKENS = 4096
 
@@ -51,33 +56,7 @@ def encode_image_to_base64(image_path: str) -> str:
 
 @track_token_usage
 def make_llm_call(client, model, temperature, system_message, prompt):
-    if model.startswith("ollama/"):
-        return client.chat.completions.create(
-            model=model.replace("ollama/", ""),
-            messages=[
-                {"role": "system", "content": system_message},
-                *prompt,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-            n=1,
-            stop=None,
-            seed=0,
-        )
-    elif "gpt" in model:
-        return client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *prompt,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-            n=1,
-            stop=None,
-            seed=0,
-        )
-    elif "o1" in model or "o3" in model:
+    if is_openai_reasoning_model(model):
         return client.chat.completions.create(
             model=model,
             messages=[
@@ -88,34 +67,30 @@ def make_llm_call(client, model, temperature, system_message, prompt):
             n=1,
             seed=0,
         )
-    else:
-        raise ValueError(f"Model {model} not supported.")
+    return client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_message},
+            *prompt,
+        ],
+        temperature=temperature,
+        max_tokens=MAX_NUM_TOKENS,
+        n=1,
+        stop=None,
+    )
 
 
 @track_token_usage
 def make_vlm_call(client, model, temperature, system_message, prompt):
-    if model.startswith("ollama/"):
-        return client.chat.completions.create(
-            model=model.replace("ollama/", ""),
-            messages=[
-                {"role": "system", "content": system_message},
-                *prompt,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-        )
-    elif "gpt" in model:
-        return client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *prompt,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-        )
-    else:
-        raise ValueError(f"Model {model} not supported.")
+    return client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_message},
+            *prompt,
+        ],
+        temperature=temperature,
+        max_tokens=MAX_NUM_TOKENS,
+    )
 
 
 def prepare_vlm_prompt(msg, image_paths, max_images):
@@ -144,41 +119,33 @@ def get_response_from_vlm(
     if msg_history is None:
         msg_history = []
 
-    if model in AVAILABLE_VLMS:
-        # Convert single image path to list for consistent handling
-        if isinstance(image_paths, str):
-            image_paths = [image_paths]
+    if isinstance(image_paths, str):
+        image_paths = [image_paths]
 
-        # Create content list starting with the text message
-        content = [{"type": "text", "text": msg}]
-
-        # Add each image to the content list
-        for image_path in image_paths[:max_images]:
-            base64_image = encode_image_to_base64(image_path)
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{base64_image}",
-                        "detail": "low",
-                    },
-                }
-            )
-        # Construct message with all images
-        new_msg_history = msg_history + [{"role": "user", "content": content}]
-
-        response = make_vlm_call(
-            client,
-            model,
-            temperature,
-            system_message=system_message,
-            prompt=new_msg_history,
+    content = [{"type": "text", "text": msg}]
+    for image_path in image_paths[:max_images]:
+        base64_image = encode_image_to_base64(image_path)
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{base64_image}",
+                    "detail": "low",
+                },
+            }
         )
+    new_msg_history = msg_history + [{"role": "user", "content": content}]
 
-        content = response.choices[0].message.content
-        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    else:
-        raise ValueError(f"Model {model} not supported.")
+    response = make_vlm_call(
+        client,
+        model,
+        temperature,
+        system_message=system_message,
+        prompt=new_msg_history,
+    )
+
+    content = response.choices[0].message.content
+    new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
 
     if print_debug:
         print()
@@ -194,23 +161,14 @@ def get_response_from_vlm(
 
 def create_client(model: str) -> tuple[Any, str]:
     """Create client for vision-language model."""
-    if model in [
-        "gpt-4o-2024-05-13",
-        "gpt-4o-2024-08-06",
-        "gpt-4o-2024-11-20",
-        "gpt-4o-mini-2024-07-18",
-        "o3-mini",
-    ]:
-        print(f"Using OpenAI API with model {model}.")
-        return openai.OpenAI(), model
-    elif model.startswith("ollama/"):
-        print(f"Using Ollama API with model {model}.")
-        return openai.OpenAI(
-            api_key=os.environ.get("OLLAMA_API_KEY", ""),
-            base_url="http://localhost:11434/v1"
-        ), model
-    else:
-        raise ValueError(f"Model {model} not supported.")
+    if is_explicit_anthropic_model(model):
+        raise ValueError(
+            "Direct Anthropic VLM routing is not implemented here. "
+            "Use an OpenAI-compatible VLM endpoint or Ollama."
+        )
+    spec = create_openai_client(model)
+    print(f"Using {spec.route} API with model {spec.model}.")
+    return spec.client, spec.model
 
 
 def extract_json_between_markers(llm_output: str) -> dict | None:
@@ -279,61 +237,38 @@ def get_batch_responses_from_vlm(
     if msg_history is None:
         msg_history = []
 
-    if model in AVAILABLE_VLMS:
-        # Convert single image path to list
-        if isinstance(image_paths, str):
-            image_paths = [image_paths]
+    if isinstance(image_paths, str):
+        image_paths = [image_paths]
 
-        # Create content list with text and images
-        content = [{"type": "text", "text": msg}]
-        for image_path in image_paths[:max_images]:
-            base64_image = encode_image_to_base64(image_path)
-            content.append(
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{base64_image}",
-                        "detail": "low",
-                    },
-                }
-            )
+    content = [{"type": "text", "text": msg}]
+    for image_path in image_paths[:max_images]:
+        base64_image = encode_image_to_base64(image_path)
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{base64_image}",
+                    "detail": "low",
+                },
+            }
+        )
 
-        # Construct message with all images
-        new_msg_history = msg_history + [{"role": "user", "content": content}]
+    new_msg_history = msg_history + [{"role": "user", "content": content}]
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_message},
+            *new_msg_history,
+        ],
+        temperature=temperature,
+        max_tokens=MAX_NUM_TOKENS,
+        n=n_responses,
+    )
 
-        if model.startswith("ollama/"):
-            response = client.chat.completions.create(
-                model=model.replace("ollama/", ""),
-                messages=[
-                    {"role": "system", "content": system_message},
-                    *new_msg_history,
-                ],
-                temperature=temperature,
-                max_tokens=MAX_NUM_TOKENS,
-                n=n_responses,
-                seed=0,
-            )
-        else:
-            # Get multiple responses
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_message},
-                    *new_msg_history,
-                ],
-                temperature=temperature,
-                max_tokens=MAX_NUM_TOKENS,
-                n=n_responses,
-                seed=0,
-            )
-
-        # Extract content from all responses
-        contents = [r.message.content for r in response.choices]
-        new_msg_histories = [
-            new_msg_history + [{"role": "assistant", "content": c}] for c in contents
-        ]
-    else:
-        raise ValueError(f"Model {model} not supported.")
+    contents = [r.message.content for r in response.choices]
+    new_msg_histories = [
+        new_msg_history + [{"role": "assistant", "content": c}] for c in contents
+    ]
 
     if print_debug:
         # Just print the first response

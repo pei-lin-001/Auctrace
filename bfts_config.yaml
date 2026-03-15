@@ -16,9 +16,42 @@ exp_name: run # a random experiment name will be generated if not provided
 
 # settings for code execution
 exec:
+  backend: local
   timeout: 3600
   agent_file_name: runfile.py
   format_tb_ipython: False
+  vast:
+    api_key_env: VAST_API_KEY
+    private_ssh_key_path_env: VAST_SSH_PRIVATE_KEY_PATH
+    public_ssh_key_path_env: VAST_SSH_PUBLIC_KEY_PATH
+    existing_instance_id: null
+    offer_id: null
+    auto_destroy: true
+    readiness_timeout: 900
+    setup_timeout: 1800
+    instance_poll_interval: 10
+    max_provision_attempts: 3
+    ssh_probe_retries: 6
+    ssh_probe_retry_delay: 10
+    ssh_probe_timeout: 30
+    ssh_probe_connect_timeout: 15
+    remote_root: /workspace/auctrace
+    image: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel
+    disk_gb: 64
+    runtype: ssh_direct
+    label_prefix: auctrace
+    setup_commands: []
+    search:
+      limit: 25
+      order: dph_total
+      type: on-demand
+      verified: true
+      rentable: true
+      rented: false
+      num_gpus: 1
+      reliability_min: 0.95
+      inet_up_min: 100
+      direct_port_count_min: 1
 
 generate_report: True
 # LLM settings for final report from journal

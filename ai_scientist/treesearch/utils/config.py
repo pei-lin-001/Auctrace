@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Hashable, cast, Literal, Optional
+from typing import Any, Hashable, cast, Literal, Optional
 
 import coolname
 import rich
@@ -75,9 +75,11 @@ class AgentConfig:
 
 @dataclass
 class ExecConfig:
+    backend: str
     timeout: int
     agent_file_name: str
     format_tb_ipython: bool
+    vast: Optional[dict[str, Any]] = None
 
 
 @dataclass

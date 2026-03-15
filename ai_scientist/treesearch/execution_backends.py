@@ -1,0 +1,33 @@
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from .interpreter import Interpreter
+from .vast_execution import VastRemoteInterpreter
+
+
+def create_interpreter(
+    cfg: Any,
+    working_dir: Path | str,
+    gpu_id: int | None = None,
+    env_vars: dict[str, str] | None = None,
+):
+    backend = getattr(cfg.exec, "backend", "local")
+    common_args = {
+        "working_dir": working_dir,
+        "timeout": cfg.exec.timeout,
+        "agent_file_name": cfg.exec.agent_file_name,
+        "env_vars": env_vars or {},
+    }
+    if backend == "vast":
+        return VastRemoteInterpreter(
+            vast_cfg=cfg.exec.vast,
+            run_name=cfg.exp_name,
+            gpu_id=gpu_id,
+            **common_args,
+        )
+    return Interpreter(
+        format_tb_ipython=cfg.exec.format_tb_ipython,
+        **common_args,
+    )

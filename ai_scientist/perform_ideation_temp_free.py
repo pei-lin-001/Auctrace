@@ -9,7 +9,6 @@ import sys
 
 sys.path.append(osp.join(osp.dirname(__file__), ".."))
 from ai_scientist.llm import (
-    AVAILABLE_LLMS,
     create_client,
     get_response_from_llm,
 )
@@ -274,8 +273,7 @@ if __name__ == "__main__":
         "--model",
         type=str,
         default="gpt-4o-2024-05-13",
-        choices=AVAILABLE_LLMS,
-        help="Model to use for AI Scientist.",
+        help="Model to use for AI Scientist. Supports direct providers and arbitrary OpenAI-compatible model names.",
     )
     parser.add_argument(
         "--max-num-generations",

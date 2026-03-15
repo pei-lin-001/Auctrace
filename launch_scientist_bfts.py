@@ -8,6 +8,7 @@ import re
 import sys
 from datetime import datetime
 from ai_scientist.llm import create_client
+from omegaconf import OmegaConf
 
 from contextlib import contextmanager
 from ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager import (
@@ -137,6 +138,19 @@ def get_available_gpus(gpu_ids=None):
     return list(range(torch.cuda.device_count()))
 
 
+def describe_execution_backend(config_path="bfts_config.yaml"):
+    try:
+        cfg = OmegaConf.load(config_path)
+    except Exception:
+        return f"Using GPUs: {get_available_gpus()}"
+    backend = cfg.get("exec", {}).get("backend", "local")
+    if backend != "vast":
+        return f"Using GPUs: {get_available_gpus()}"
+    search_cfg = cfg.get("exec", {}).get("vast", {}).get("search", {})
+    requested = search_cfg.get("num_gpus", "unknown")
+    return f"Using Vast.ai execution backend (requested GPUs: {requested})"
+
+
 def find_pdf_path_for_review(idea_dir):
     pdf_files = [f for f in os.listdir(idea_dir) if f.endswith(".pdf")]
     reflection_pdfs = [f for f in pdf_files if "reflection" in f]
@@ -185,8 +199,7 @@ if __name__ == "__main__":
     print(f"Set AI_SCIENTIST_ROOT to {os.environ['AI_SCIENTIST_ROOT']}")
 
     # Check available GPUs and adjust parallel processes if necessary
-    available_gpus = get_available_gpus()
-    print(f"Using GPUs: {available_gpus}")
+    print(describe_execution_backend())
 
     with open(args.load_ideas, "r") as f:
         ideas = json.load(f)

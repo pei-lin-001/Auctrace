@@ -2,6 +2,7 @@
 anthropic
 backoff
 openai
+vastai-sdk
 # Viz
 matplotlib
 pypdf

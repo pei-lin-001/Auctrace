@@ -1,5 +1,6 @@
 from . import backend_anthropic, backend_openai
 from .utils import FunctionSpec, OutputType, PromptType, compile_prompt_to_md
+from ai_scientist.openai_compatible import is_explicit_anthropic_model
 
 def get_ai_client(model: str, **model_kwargs):
     """
@@ -11,7 +12,7 @@ def get_ai_client(model: str, **model_kwargs):
     Returns:
         An instance of the appropriate AI client.
     """
-    if "claude-" in model:
+    if is_explicit_anthropic_model(model):
         return backend_anthropic.get_ai_client(model=model, **model_kwargs)
     else:
         return backend_openai.get_ai_client(model=model, **model_kwargs)
@@ -66,7 +67,7 @@ def query(
     else:
         model_kwargs["max_tokens"] = max_tokens
 
-    query_func = backend_anthropic.query if "claude-" in model else backend_openai.query
+    query_func = backend_anthropic.query if is_explicit_anthropic_model(model) else backend_openai.query
     output, req_time, in_tok_count, out_tok_count, info = query_func(
         system_message=compile_prompt_to_md(system_message) if system_message else None,
         user_message=compile_prompt_to_md(user_message) if user_message else None,
