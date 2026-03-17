@@ -19,6 +19,11 @@ from dataclasses import asdict
 from omegaconf import OmegaConf
 from .execution_backends import create_interpreter
 from .vast_api import cleanup_vast_runtime, prepare_vast_runtime
+from .worker_failures import (
+    build_retryable_llm_failure_node,
+    is_infra_failure_node,
+    is_retryable_llm_exception,
+)
 
 from rich import print
 from pathlib import Path
@@ -666,6 +671,7 @@ class MinimalAgent:
                 user_message=None,
                 model=self.cfg.agent.code.model,
                 temperature=self.cfg.agent.code.temp,
+                fallback_model=self.cfg.agent.code.fallback_model,
             )
 
             code = extract_code(completion_text)
@@ -708,6 +714,7 @@ class MinimalAgent:
                 func_spec=review_func_spec,
                 model=self.cfg.agent.feedback.model,
                 temperature=self.cfg.agent.feedback.temp,
+                fallback_model=self.cfg.agent.feedback.fallback_model,
             ),
         )
 
@@ -859,6 +866,7 @@ class MinimalAgent:
                 user_message=None,
                 model=self.cfg.agent.feedback.model,
                 temperature=self.cfg.agent.feedback.temp,
+                fallback_model=self.cfg.agent.feedback.fallback_model,
             )
 
             (
@@ -936,6 +944,7 @@ class MinimalAgent:
                         func_spec=plot_selection_spec,
                         model=self.cfg.agent.feedback.model,
                         temperature=self.cfg.agent.feedback.temp,
+                        fallback_model=self.cfg.agent.feedback.fallback_model,
                     ),
                 )
 
@@ -1014,6 +1023,7 @@ class MinimalAgent:
                 func_spec=vlm_feedback_spec,
                 model=self.cfg.agent.vlm_feedback.model,
                 temperature=self.cfg.agent.vlm_feedback.temp,
+                fallback_model=self.cfg.agent.vlm_feedback.fallback_model,
             ),
         )
         print(
@@ -1086,6 +1096,7 @@ class MinimalAgent:
                 },
                 model=self.cfg.agent.feedback.model,
                 temperature=self.cfg.agent.feedback.temp,
+                fallback_model=self.cfg.agent.feedback.fallback_model,
             ),
         )
 
@@ -1228,6 +1239,7 @@ class ParallelAgent:
             user_message=None,
             model=self.cfg.agent.code.model,
             temperature=self.cfg.agent.code.temp,
+            fallback_model=self.cfg.agent.code.fallback_model,
         )
 
         print(f"[green]Defined eval metrics:[/green] {response}")
@@ -1242,6 +1254,7 @@ class ParallelAgent:
                 user_message=None,
                 model=self.cfg.agent.code.model,
                 temperature=self.cfg.agent.code.temp,
+                fallback_model=self.cfg.agent.code.fallback_model,
             )
 
             code = extract_code(completion_text)
@@ -1471,6 +1484,7 @@ class ParallelAgent:
             gpu_id=gpu_id,
         )
 
+        parent_node = None
         try:
             print(f"stage_name: {stage_name}")
             # Recreate node object from node_data, which becomes a parent node.
@@ -1630,6 +1644,7 @@ class ParallelAgent:
                                 func_spec=metric_parse_spec,
                                 model=cfg.agent.feedback.model,
                                 temperature=cfg.agent.feedback.temp,
+                                fallback_model=cfg.agent.feedback.fallback_model,
                             ),
                         )
                         # If there is any None value, child_node.metric should be set to WorstMetricValue.
@@ -1798,7 +1813,18 @@ class ParallelAgent:
             print(f"Worker process error: {str(e)}")
             import traceback
 
-            traceback.print_exc()
+            traceback_text = traceback.format_exc()
+            print(traceback_text)
+            if is_retryable_llm_exception(e):
+                logger.warning(
+                    "Returning a serializable retryable LLM failure node instead of crashing the process pool."
+                )
+                return build_retryable_llm_failure_node(
+                    parent_node,
+                    stage_name,
+                    e,
+                    traceback_text,
+                )
             raise
 
     def _generate_hyperparam_tuning_idea(self) -> Optional[HyperparamTuningIdea]:
@@ -1840,6 +1866,7 @@ class ParallelAgent:
                 user_message=None,
                 model=self.cfg.agent.code.model,
                 temperature=self.cfg.agent.code.temp,
+                fallback_model=self.cfg.agent.code.fallback_model,
             )
 
             # Parse the response
@@ -1903,6 +1930,7 @@ class ParallelAgent:
                 user_message=None,
                 model=self.cfg.agent.code.model,
                 temperature=self.cfg.agent.code.temp,
+                fallback_model=self.cfg.agent.code.fallback_model,
             )
 
             # Parse the response
@@ -1990,6 +2018,7 @@ class ParallelAgent:
                             isinstance(n, Node)
                             and n.is_leaf
                             and n.debug_depth <= search_cfg.max_debug_depth
+                            and not is_infra_failure_node(n)
                         )
                     ]
                 except Exception as e:
@@ -2080,7 +2109,8 @@ class ParallelAgent:
                 include_code=False, 
                 **{
                     "model": self.cfg.agent.summary.model, 
-                    "temp": self.cfg.agent.summary.temp
+                    "temp": self.cfg.agent.summary.temp,
+                    "fallback_model": self.cfg.agent.summary.fallback_model,
                 }
             )
         else:

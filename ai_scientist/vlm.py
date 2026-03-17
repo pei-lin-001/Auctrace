@@ -4,37 +4,16 @@ import re
 import json
 import backoff
 import openai
-import os
 from PIL import Image
 from ai_scientist.utils.token_tracker import track_token_usage
+from ai_scientist.openai_chat_completions import create_chat_completion_with_fallback
 from ai_scientist.openai_compatible import (
     create_openai_client,
-    is_explicit_anthropic_model,
     is_openai_reasoning_model,
+    max_output_token_limit,
 )
 
-MAX_NUM_TOKENS = 4096
-
-AVAILABLE_VLMS = [
-    "gpt-4o-2024-05-13",
-    "gpt-4o-2024-08-06",
-    "gpt-4o-2024-11-20",
-    "gpt-4o-mini-2024-07-18",
-    "o3-mini",
-
-    # Ollama models
-
-    # llama4
-    "ollama/llama4:16x17b",
-
-    # mistral
-    "ollama/mistral-small3.2:24b",
-
-    # qwen
-    "ollama/qwen2.5vl:32b",
-
-    "ollama/z-uo/qwen2.5vl_tools:32b",
-]
+MAX_NUM_TOKENS = max_output_token_limit()
 
 
 def encode_image_to_base64(image_path: str) -> str:
@@ -57,40 +36,55 @@ def encode_image_to_base64(image_path: str) -> str:
 @track_token_usage
 def make_llm_call(client, model, temperature, system_message, prompt):
     if is_openai_reasoning_model(model):
-        return client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "user", "content": system_message},
-                *prompt,
-            ],
-            temperature=1,
-            n=1,
-            seed=0,
-        )
-    return client.chat.completions.create(
-        model=model,
-        messages=[
+        messages = [
+            {"role": "user", "content": system_message},
+            *prompt,
+        ]
+        request_kwargs = {
+            "temperature": 1,
+            "n": 1,
+            "seed": 0,
+        }
+    else:
+        messages = [
             {"role": "system", "content": system_message},
             *prompt,
-        ],
-        temperature=temperature,
-        max_tokens=MAX_NUM_TOKENS,
-        n=1,
-        stop=None,
+        ]
+        request_kwargs = {
+            "temperature": temperature,
+            "max_tokens": MAX_NUM_TOKENS,
+            "n": 1,
+            "stop": None,
+        }
+
+    completion, _ = create_chat_completion_with_fallback(
+        client,
+        messages=messages,
+        model=model,
+        fallback_model=None,
+        request_kwargs=request_kwargs,
     )
+    return completion
 
 
 @track_token_usage
 def make_vlm_call(client, model, temperature, system_message, prompt):
-    return client.chat.completions.create(
+    messages = [
+        {"role": "system", "content": system_message},
+        *prompt,
+    ]
+    request_kwargs = {
+        "temperature": temperature,
+        "max_tokens": MAX_NUM_TOKENS,
+    }
+    completion, _ = create_chat_completion_with_fallback(
+        client,
+        messages=messages,
         model=model,
-        messages=[
-            {"role": "system", "content": system_message},
-            *prompt,
-        ],
-        temperature=temperature,
-        max_tokens=MAX_NUM_TOKENS,
+        fallback_model=None,
+        request_kwargs=request_kwargs,
     )
+    return completion
 
 
 def prepare_vlm_prompt(msg, image_paths, max_images):
@@ -161,11 +155,6 @@ def get_response_from_vlm(
 
 def create_client(model: str) -> tuple[Any, str]:
     """Create client for vision-language model."""
-    if is_explicit_anthropic_model(model):
-        raise ValueError(
-            "Direct Anthropic VLM routing is not implemented here. "
-            "Use an OpenAI-compatible VLM endpoint or Ollama."
-        )
     spec = create_openai_client(model)
     print(f"Using {spec.route} API with model {spec.model}.")
     return spec.client, spec.model
@@ -254,15 +243,21 @@ def get_batch_responses_from_vlm(
         )
 
     new_msg_history = msg_history + [{"role": "user", "content": content}]
-    response = client.chat.completions.create(
+    messages = [
+        {"role": "system", "content": system_message},
+        *new_msg_history,
+    ]
+    request_kwargs = {
+        "temperature": temperature,
+        "max_tokens": MAX_NUM_TOKENS,
+        "n": n_responses,
+    }
+    response, _ = create_chat_completion_with_fallback(
+        client,
+        messages=messages,
         model=model,
-        messages=[
-            {"role": "system", "content": system_message},
-            *new_msg_history,
-        ],
-        temperature=temperature,
-        max_tokens=MAX_NUM_TOKENS,
-        n=n_responses,
+        fallback_model=None,
+        request_kwargs=request_kwargs,
     )
 
     contents = [r.message.content for r in response.choices]

@@ -54,6 +54,11 @@ def normalize_vast_settings(exec_cfg: Any) -> dict[str, Any]:
         "disk_gb": raw.get("disk_gb", 64),
         "runtype": raw.get("runtype", "ssh_direct"),
         "label_prefix": raw.get("label_prefix", "auctrace"),
+        "install_project_requirements": raw.get("install_project_requirements", True),
+        "requirements_file": raw.get("requirements_file", "requirements.txt"),
+        "pip_install_timeout": raw.get("pip_install_timeout", 1800),
+        "auto_install_missing_packages": raw.get("auto_install_missing_packages", True),
+        "max_auto_dependency_installs": raw.get("max_auto_dependency_installs", 3),
         "setup_commands": raw.get("setup_commands", []),
         "search": {
             "limit": search.get("limit", 25),

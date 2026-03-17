@@ -196,25 +196,26 @@ def track_token_usage(func):
         logging.info("kwargs: ", kwargs)
 
         if hasattr(result, "usage") and result.usage.completion_tokens_details is not None:
+            prompt_token_details = getattr(result.usage, "prompt_tokens_details", None)
+            cached_tokens = 0
+            if prompt_token_details is not None and prompt_token_details.cached_tokens is not None:
+                cached_tokens = prompt_token_details.cached_tokens
+            reasoning_tokens = result.usage.completion_tokens_details.reasoning_tokens or 0
+            choices = getattr(result, "choices", None) or []
+            content = choices[0].message.content if choices else ""
             token_tracker.add_tokens(
                 model,
                 result.usage.prompt_tokens,
                 result.usage.completion_tokens,
-                result.usage.completion_tokens_details.reasoning_tokens,
-                (
-                    result.usage.prompt_tokens_details.cached_tokens
-                    if hasattr(result.usage, "prompt_tokens_details")
-                    else 0
-                ),
+                reasoning_tokens,
+                cached_tokens,
             )
             # Add interaction details
             token_tracker.add_interaction(
                 model,
                 system_message,
                 prompt,
-                result.choices[
-                    0
-                ].message.content,  # Assumes response is in content field
+                content,
                 timestamp,
             )
         return result

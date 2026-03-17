@@ -8,6 +8,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from ai_scientist.project_env import load_project_env
+
 from .vast_common import VAST_API_ROOT, VastRuntime, normalize_vast_settings, set_runtime
 from .vast_ssh import (
     probe_ssh_runtime,
@@ -30,6 +32,7 @@ INSTANCE_FAILURE_MARKERS = (
     "tls:",
     "no host in request url",
 )
+load_project_env()
 
 
 def build_vast_client(api_key: str) -> VastAI:
@@ -144,13 +147,14 @@ def destroy_instance(api_key: str, instance_id: int) -> None:
 def offer_candidates(client: VastAI, settings: dict[str, Any]) -> list[dict[str, Any]]:
     if settings["offer_id"] is not None:
         return [{"offer_id": int(settings["offer_id"]), "machine_id": None}]
+    query = search_query(settings)
     offers = coerce_offers(
         client.search_offers(
             type=settings["search"]["type"],
             no_default=True,
             limit=max(settings["search"]["limit"], settings["max_provision_attempts"]),
             order=settings["search"]["order"],
-            query=search_query(settings),
+            query=query,
         )
     )
     candidates = []
@@ -162,7 +166,13 @@ def offer_candidates(client: VastAI, settings: dict[str, Any]) -> list[dict[str,
             }
         )
     if not candidates:
-        raise RuntimeError("No Vast.ai offers matched the configured search filters")
+        raise RuntimeError(
+            "No Vast.ai offers matched the configured search filters.\n"
+            f"query={query}\n"
+            f"search={settings.get('search')}\n"
+            "If this is unexpected, check network/proxy settings. "
+            "The launcher can disable proxies via --disable-http-proxy."
+        )
     return candidates
 
 

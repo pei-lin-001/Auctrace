@@ -455,8 +455,8 @@ def perform_writeup(
     base_folder,
     no_writing=False,
     num_cite_rounds=20,
-    small_model="gpt-4o-2024-05-13",
-    big_model="o1-2024-12-17",
+    small_model="deepseek-chat",
+    big_model="deepseek-chat",
     n_writeup_reflections=3,
     page_limit=8,
 ):
@@ -767,13 +767,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
+        default="deepseek-chat",
         help="Model to use for citation collection (small model). Supports arbitrary OpenAI-compatible model names.",
     )
     parser.add_argument(
         "--big-model",
         type=str,
-        default="o1-2024-12-17",
+        default="deepseek-chat",
         help="Model to use for final writeup (big model). Supports arbitrary OpenAI-compatible model names.",
     )
     parser.add_argument(

@@ -1,6 +1,8 @@
 import json
 import os
+import re
 import sys
+from typing import Any
 
 from .journal import Node, Journal
 
@@ -269,7 +271,7 @@ def annotate_history(journal, cfg=None):
                     if cfg.agent.get("summary", None) is not None:
                         model = cfg.agent.summary.model
                     else:
-                        model = "gpt-4o-2024-08-06"
+                        model = "MiniMax-M2.5"
                     client = get_ai_client(model)
                     response = get_response_from_llm(
                         overall_plan_summarizer_prompt.format(
@@ -296,67 +298,114 @@ def annotate_history(journal, cfg=None):
             node.overall_plan = node.plan
 
 
+def _parse_stage_number(stage_name: str) -> int:
+    match = re.match(r"(?:stage_)?(\d+)_", stage_name)
+    if not match:
+        raise ValueError(f"Unexpected stage name format: {stage_name!r}")
+    return int(match.group(1))
+
+
+def _group_stage_journals(
+    journals: list[tuple[str, Journal]],
+) -> dict[int, list[tuple[str, Journal]]]:
+    stage_groups: dict[int, list[tuple[str, Journal]]] = {}
+    for stage_name, journal in journals:
+        stage_number = _parse_stage_number(str(stage_name))
+        stage_groups.setdefault(stage_number, []).append((stage_name, journal))
+    return stage_groups
+
+
+def _summarize_best_node(stage_name: str, journal: Journal, cfg: Any) -> dict[str, Any]:
+    best_node = journal.get_best_node(cfg=cfg)
+    if best_node is None:
+        raise ValueError(f"No best node found for stage {stage_name!r}")
+    child_nodes = best_node.children
+    multi_seed_nodes = [n for n in child_nodes if n.is_seed_node and not n.is_seed_agg_node]
+    agg_node = next((n for n in child_nodes if n.is_seed_node and n.is_seed_agg_node), None)
+    summary: dict[str, Any] = {
+        "best node": get_node_log(best_node),
+        "best node with different seeds": [get_node_log(n) for n in multi_seed_nodes],
+    }
+    if agg_node is not None:
+        summary["aggregated results of nodes with different seeds"] = get_node_log(agg_node)
+    return summary
+
+
+def _summarize_ablation(stage_name: str, journal: Journal) -> list[dict[str, Any]]:
+    good_leaf_nodes = [n for n in journal.good_nodes if n.is_leaf and n.ablation_name]
+    logs = []
+    for node in good_leaf_nodes:
+        payload = get_node_log(node)
+        payload["stage_name"] = stage_name
+        logs.append(payload)
+    return logs
+
+
+def _summarize_draft(stage_name: str, journal: Journal, cfg: Any) -> dict[str, Any]:
+    model = (
+        cfg.agent.summary.get("model", "")
+        if cfg is not None and cfg.agent.get("summary", None) is not None
+        else "MiniMax-M2.5"
+    )
+    client = get_ai_client(model)
+    return get_stage_summary(journal, stage_name, model, client)
+
+
+def _process_summary_task(task: tuple[str, str, Journal], cfg: Any) -> tuple[str, Any]:
+    kind, stage_name, journal = task
+    annotate_history(journal, cfg=cfg)
+    if kind == "draft":
+        return kind, _summarize_draft(stage_name, journal, cfg)
+    if kind in {"baseline", "research"}:
+        payload = _summarize_best_node(stage_name, journal, cfg)
+        payload["stage_name"] = stage_name
+        return kind, payload
+    if kind == "ablation":
+        return kind, _summarize_ablation(stage_name, journal)
+    raise ValueError(f"Unknown summary task kind: {kind!r}")
+
+
 def overall_summarize(journals, cfg=None):
     from concurrent.futures import ThreadPoolExecutor
-
-    def process_stage(idx, stage_tuple):
-        stage_name, journal = stage_tuple
-        annotate_history(journal, cfg=cfg)
-        if idx in [1, 2]:
-            best_node = journal.get_best_node(cfg=cfg)
-            # get multi-seed results and aggregater node
-            child_nodes = best_node.children
-            multi_seed_nodes = [
-                n for n in child_nodes if n.is_seed_node and not n.is_seed_agg_node
-            ]
-            agg_node = None
-            for n in child_nodes:
-                if n.is_seed_node and n.is_seed_agg_node:
-                    agg_node = n
-                    break
-            if agg_node is None:
-                # skip agg node
-                return {
-                    "best node": get_node_log(best_node),
-                    "best node with different seeds": [
-                        get_node_log(n) for n in multi_seed_nodes
-                    ],
-                }
-            else:
-                return {
-                    "best node": get_node_log(best_node),
-                    "best node with different seeds": [
-                        get_node_log(n) for n in multi_seed_nodes
-                    ],
-                    "aggregated results of nodes with different seeds": get_node_log(
-                        agg_node
-                    ),
-                }
-        elif idx == 3:
-            good_leaf_nodes = [
-                n for n in journal.good_nodes if n.is_leaf and n.ablation_name
-            ]
-            return [get_node_log(n) for n in good_leaf_nodes]
-        elif idx == 0:
-            if cfg.agent.get("summary", None) is not None:
-                model = cfg.agent.summary.get("model", "")
-            else:
-                model = "gpt-4o-2024-08-06"
-            client = get_ai_client(model)
-            summary_json = get_stage_summary(journal, stage_name, model, client)
-            return summary_json
-
     from tqdm import tqdm
 
+    journal_items = list(journals)
+    stage_groups = _group_stage_journals(journal_items)
+    stage1 = stage_groups.get(1, [])
+    stage2 = stage_groups.get(2, [])
+    stage3 = stage_groups.get(3, [])
+    stage4 = stage_groups.get(4, [])
+
+    tasks: list[tuple[str, str, Journal]] = []
+    if stage1:
+        tasks.append(("draft", stage1[-1][0], stage1[-1][1]))
+    if stage2:
+        tasks.append(("baseline", stage2[-1][0], stage2[-1][1]))
+    if stage3:
+        tasks.append(("research", stage3[-1][0], stage3[-1][1]))
+    tasks.extend([("ablation", stage_name, journal) for stage_name, journal in stage4])
+
+    draft_summary: dict[str, Any] = {}
+    baseline_summary: dict[str, Any] = {}
+    research_summary: dict[str, Any] = {}
+    ablation_summary: list[dict[str, Any]] = []
     with ThreadPoolExecutor() as executor:
         results = list(
             tqdm(
-                executor.map(process_stage, range(len(list(journals))), journals),
+                executor.map(lambda task: _process_summary_task(task, cfg), tasks),
                 desc="Processing stages",
-                total=len(list(journals)),
+                total=len(tasks),
             )
         )
-        draft_summary, baseline_summary, research_summary, ablation_summary = results
+    for kind, payload in results:
+        if kind == "draft":
+            draft_summary = payload
+        elif kind == "baseline":
+            baseline_summary = payload
+        elif kind == "research":
+            research_summary = payload
+        elif kind == "ablation":
+            ablation_summary.extend(payload)
 
     return draft_summary, baseline_summary, research_summary, ablation_summary
 

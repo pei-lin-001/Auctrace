@@ -1,88 +1,19 @@
 import json
-import os
 import re
 from typing import Any
-from ai_scientist.utils.token_tracker import track_token_usage
 
-import anthropic
 import backoff
 import openai
+
+from ai_scientist.openai_chat_completions import create_chat_completion_with_fallback
 from ai_scientist.openai_compatible import (
     create_openai_client,
-    has_openai_compatible_base_url,
-    is_explicit_anthropic_model,
     is_openai_reasoning_model,
+    max_output_token_limit,
 )
+from ai_scientist.utils.token_tracker import track_token_usage
 
-MAX_NUM_TOKENS = 4096
-
-AVAILABLE_LLMS = [
-    "claude-3-5-sonnet-20240620",
-    "claude-3-5-sonnet-20241022",
-    # OpenAI models
-    "gpt-4o-mini",
-    "gpt-4o-mini-2024-07-18",
-    "gpt-4o",
-    "gpt-4o-2024-05-13",
-    "gpt-4o-2024-08-06",
-    "gpt-4.1",
-    "gpt-4.1-2025-04-14",
-    "gpt-4.1-mini",
-    "gpt-4.1-mini-2025-04-14",
-    "o1",
-    "o1-2024-12-17",
-    "o1-preview-2024-09-12",
-    "o1-mini",
-    "o1-mini-2024-09-12",
-    "o3-mini",
-    "o3-mini-2025-01-31",
-    # DeepSeek Models
-    "deepseek-coder-v2-0724",
-    "deepcoder-14b",
-    # Llama 3 models
-    "llama3.1-405b",
-    # Anthropic Claude models via Amazon Bedrock
-    "bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
-    "bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0",
-    "bedrock/anthropic.claude-3-5-sonnet-20241022-v2:0",
-    "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
-    "bedrock/anthropic.claude-3-opus-20240229-v1:0",
-    # Anthropic Claude models Vertex AI
-    "vertex_ai/claude-3-opus@20240229",
-    "vertex_ai/claude-3-5-sonnet@20240620",
-    "vertex_ai/claude-3-5-sonnet@20241022",
-    "vertex_ai/claude-3-sonnet@20240229",
-    "vertex_ai/claude-3-haiku@20240307",
-    # Google Gemini models
-    "gemini-2.0-flash",
-    "gemini-2.5-flash-preview-04-17",
-    "gemini-2.5-pro-preview-03-25",
-    # GPT-OSS models via Ollama
-    "ollama/gpt-oss:20b",
-    "ollama/gpt-oss:120b",
-    # Qwen models via Ollama
-    "ollama/qwen3:8b",
-    "ollama/qwen3:32b",
-    "ollama/qwen3:235b",
-
-    "ollama/qwen2.5vl:8b",
-    "ollama/qwen2.5vl:32b",
-
-    "ollama/qwen3-coder:70b",
-    "ollama/qwen3-coder:480b",
-
-    # Deepseek models via Ollama
-    "ollama/deepseek-r1:8b",
-    "ollama/deepseek-r1:32b",
-    "ollama/deepseek-r1:70b",
-    "ollama/deepseek-r1:671b",
-]
-
-ANTHROPIC_CLIENT_TYPES = (
-    anthropic.Anthropic,
-    anthropic.AnthropicBedrock,
-    anthropic.AnthropicVertex,
-)
+MAX_NUM_TOKENS = max_output_token_limit()
 
 
 # Get N responses from a single message, used for ensembling.
@@ -92,10 +23,8 @@ ANTHROPIC_CLIENT_TYPES = (
         openai.RateLimitError,
         openai.APITimeoutError,
         openai.InternalServerError,
-        anthropic.RateLimitError,
     ),
 )
-@track_token_usage
 def get_batch_responses_from_llm(
     prompt,
     client,
@@ -110,24 +39,7 @@ def get_batch_responses_from_llm(
     if msg_history is None:
         msg_history = []
 
-    if not isinstance(client, ANTHROPIC_CLIENT_TYPES) and not is_openai_reasoning_model(model):
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": system_message},
-                *new_msg_history,
-            ],
-            temperature=temperature,
-            max_tokens=MAX_NUM_TOKENS,
-            n=n_responses,
-            stop=None,
-        )
-        content = [r.message.content for r in response.choices]
-        new_msg_history = [
-            new_msg_history + [{"role": "assistant", "content": c}] for c in content
-        ]
-    else:
+    if is_openai_reasoning_model(model):
         content, new_msg_history = [], []
         for _ in range(n_responses):
             c, hist = get_response_from_llm(
@@ -141,6 +53,20 @@ def get_batch_responses_from_llm(
             )
             content.append(c)
             new_msg_history.append(hist)
+    else:
+        new_msg_history = msg_history + [{"role": "user", "content": msg}]
+        response = _batch_llm_call(
+            client,
+            model,
+            temperature,
+            system_message=system_message,
+            prompt=new_msg_history,
+            n_responses=n_responses,
+        )
+        content = [r.message.content for r in response.choices]
+        new_msg_history = [
+            new_msg_history + [{"role": "assistant", "content": c}] for c in content
+        ]
 
     if print_debug:
         # Just print the first one.
@@ -156,29 +82,59 @@ def get_batch_responses_from_llm(
 
 
 @track_token_usage
+def _batch_llm_call(client, model, temperature, system_message, prompt, n_responses):
+    messages = [
+        {"role": "system", "content": system_message},
+        *prompt,
+    ]
+    request_kwargs = {
+        "temperature": temperature,
+        "max_tokens": MAX_NUM_TOKENS,
+        "n": n_responses,
+        "stop": None,
+    }
+    completion, _ = create_chat_completion_with_fallback(
+        client,
+        messages=messages,
+        model=model,
+        fallback_model=None,
+        request_kwargs=request_kwargs,
+    )
+    return completion
+
+
+@track_token_usage
 def make_llm_call(client, model, temperature, system_message, prompt):
     if is_openai_reasoning_model(model):
-        return client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "user", "content": system_message},
-                *prompt,
-            ],
-            temperature=1,
-            n=1,
-            seed=0,
-        )
-    return client.chat.completions.create(
-        model=model,
-        messages=[
+        messages = [
+            {"role": "user", "content": system_message},
+            *prompt,
+        ]
+        request_kwargs = {
+            "temperature": 1,
+            "n": 1,
+            "seed": 0,
+        }
+    else:
+        messages = [
             {"role": "system", "content": system_message},
             *prompt,
-        ],
-        temperature=temperature,
-        max_tokens=MAX_NUM_TOKENS,
-        n=1,
-        stop=None,
+        ]
+        request_kwargs = {
+            "temperature": temperature,
+            "max_tokens": MAX_NUM_TOKENS,
+            "n": 1,
+            "stop": None,
+        }
+
+    completion, _ = create_chat_completion_with_fallback(
+        client,
+        messages=messages,
+        model=model,
+        fallback_model=None,
+        request_kwargs=request_kwargs,
     )
+    return completion
 
 
 @backoff.on_exception(
@@ -187,7 +143,6 @@ def make_llm_call(client, model, temperature, system_message, prompt):
         openai.RateLimitError,
         openai.APITimeoutError,
         openai.InternalServerError,
-        anthropic.RateLimitError,
     ),
 )
 def get_response_from_llm(
@@ -203,93 +158,16 @@ def get_response_from_llm(
     if msg_history is None:
         msg_history = []
 
-    if isinstance(client, ANTHROPIC_CLIENT_TYPES):
-        new_msg_history = msg_history + [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": msg,
-                    }
-                ],
-            }
-        ]
-        response = client.messages.create(
-            model=model,
-            max_tokens=MAX_NUM_TOKENS,
-            temperature=temperature,
-            system=system_message,
-            messages=new_msg_history,
-        )
-        # response = make_llm_call(client, model, temperature, system_message=system_message, prompt=new_msg_history)
-        content = response.content[0].text
-        new_msg_history = new_msg_history + [
-            {
-                "role": "assistant",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": content,
-                    }
-                ],
-            }
-        ]
-    elif model == "deepcoder-14b" and not has_openai_compatible_base_url():
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        try:
-            response = client.chat.completions.create(
-                model="agentica-org/DeepCoder-14B-Preview",
-                messages=[
-                    {"role": "system", "content": system_message},
-                    *new_msg_history,
-                ],
-                temperature=temperature,
-                max_tokens=MAX_NUM_TOKENS,
-                n=1,
-                stop=None,
-            )
-            content = response.choices[0].message.content
-        except Exception:
-            import requests
-
-            headers = {
-                "Authorization": f"Bearer {os.environ['HUGGINGFACE_API_KEY']}",
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "inputs": {
-                    "system": system_message,
-                    "messages": [{"role": m["role"], "content": m["content"]} for m in new_msg_history],
-                },
-                "parameters": {
-                    "temperature": temperature,
-                    "max_new_tokens": MAX_NUM_TOKENS,
-                    "return_full_text": False,
-                },
-            }
-            response = requests.post(
-                "https://api-inference.huggingface.co/models/agentica-org/DeepCoder-14B-Preview",
-                headers=headers,
-                json=payload,
-            )
-            if response.status_code == 200:
-                content = response.json()["generated_text"]
-            else:
-                raise ValueError(f"Error from HuggingFace API: {response.text}")
-
-        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
-    else:
-        new_msg_history = msg_history + [{"role": "user", "content": msg}]
-        response = make_llm_call(
-            client,
-            model,
-            temperature,
-            system_message=system_message,
-            prompt=new_msg_history,
-        )
-        content = response.choices[0].message.content
-        new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
+    new_msg_history = msg_history + [{"role": "user", "content": msg}]
+    response = make_llm_call(
+        client,
+        model,
+        temperature,
+        system_message=system_message,
+        prompt=new_msg_history,
+    )
+    content = response.choices[0].message.content
+    new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
 
     if print_debug:
         print()
@@ -332,21 +210,6 @@ def extract_json_between_markers(llm_output: str) -> dict | None:
 
 
 def create_client(model) -> tuple[Any, str]:
-    if model.startswith("anthropic/") and "claude" in model:
-        client_model = model.split("/", 1)[1]
-        print(f"Using Anthropic API with model {client_model}.")
-        return anthropic.Anthropic(), client_model
-    if model.startswith("claude-") and is_explicit_anthropic_model(model):
-        print(f"Using Anthropic API with model {model}.")
-        return anthropic.Anthropic(), model
-    elif model.startswith("bedrock") and "claude" in model:
-        client_model = model.split("/")[-1]
-        print(f"Using Amazon Bedrock with model {client_model}.")
-        return anthropic.AnthropicBedrock(), client_model
-    elif model.startswith("vertex_ai") and "claude" in model:
-        client_model = model.split("/")[-1]
-        print(f"Using Vertex AI with model {client_model}.")
-        return anthropic.AnthropicVertex(), client_model
     spec = create_openai_client(model)
     print(f"Using {spec.route} API with model {spec.model}.")
     return spec.client, spec.model

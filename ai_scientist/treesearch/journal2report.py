@@ -1,13 +1,19 @@
 from .backend import query
 from .journal import Journal
 from .utils.config import StageConfig
+from ai_scientist.openai_compatible import max_output_token_limit
 
 
 def journal2report(journal: Journal, task_desc: dict, rcfg: StageConfig):
     """
     Generate a report from a journal, the report will be in markdown format.
     """
-    report_input = journal.generate_summary(include_code=True)
+    report_input = journal.generate_summary(
+        include_code=True,
+        model=rcfg.model,
+        temp=rcfg.temp,
+        fallback_model=rcfg.fallback_model,
+    )
     system_prompt_dict = {
         "Role": "You are a research assistant that always uses concise language.",
         "Goal": "The goal is to write a technical report summarising the empirical findings and technical decisions.",
@@ -27,5 +33,6 @@ def journal2report(journal: Journal, task_desc: dict, rcfg: StageConfig):
         user_message=context_prompt,
         model=rcfg.model,
         temperature=rcfg.temp,
-        max_tokens=4096,
+        max_tokens=max_output_token_limit(),
+        fallback_model=rcfg.fallback_model,
     )

@@ -367,6 +367,7 @@ Your research idea:\n\n
                 func_spec=stage_completion_eval_spec,
                 model=self.cfg.agent.feedback.model,
                 temperature=self.cfg.agent.feedback.temp,
+                fallback_model=self.cfg.agent.feedback.fallback_model,
             )
             if evaluation["is_complete"]:
                 logger.info(
@@ -476,6 +477,7 @@ Your research idea:\n\n
                     func_spec=stage_completion_eval_spec,
                     model=self.cfg.agent.feedback.model,
                     temperature=self.cfg.agent.feedback.temp,
+                    fallback_model=self.cfg.agent.feedback.fallback_model,
                 )
 
                 if evaluation["is_complete"]:
@@ -618,6 +620,7 @@ Your research idea:\n\n
                 func_spec=substage_goal_spec,
                 model=self.cfg.agent.feedback.model,
                 temperature=self.cfg.agent.feedback.temp,
+                fallback_model=self.cfg.agent.feedback.fallback_model,
             )
 
             # Format the response into a structured goal string
@@ -1024,6 +1027,7 @@ Your research idea:\n\n
                 func_spec=stage_config_spec,
                 model=self.cfg.agent.feedback.model,
                 temperature=self.cfg.agent.feedback.temp,
+                fallback_model=self.cfg.agent.feedback.fallback_model,
             )
             return response
 
@@ -1199,6 +1203,7 @@ Your research idea:\n\n
                 func_spec=stage_progress_eval_spec,
                 model=self.cfg.agent.feedback.model,
                 temperature=self.cfg.agent.feedback.temp,
+                fallback_model=self.cfg.agent.feedback.fallback_model,
             )
 
             # Log the evaluation for transparency

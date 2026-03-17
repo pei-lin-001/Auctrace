@@ -2,18 +2,20 @@ import os.path as osp
 import json
 import argparse
 import shutil
-import torch
 import os
 import re
 import sys
 from datetime import datetime
 from ai_scientist.llm import create_client
+from ai_scientist.network_env import disable_http_proxy
+from ai_scientist.project_env import load_project_env
 from omegaconf import OmegaConf
 
 from contextlib import contextmanager
 from ai_scientist.treesearch.perform_experiments_bfts_with_agentmanager import (
     perform_experiments_bfts,
 )
+from ai_scientist.treesearch.resume import load_stage_checkpoint
 from ai_scientist.treesearch.bfts_utils import (
     idea_to_markdown,
     edit_bfts_config_file,
@@ -27,6 +29,11 @@ from ai_scientist.perform_icbinb_writeup import (
 from ai_scientist.perform_llm_review import perform_review, load_paper
 from ai_scientist.perform_vlm_review import perform_imgs_cap_ref_review
 from ai_scientist.utils.token_tracker import token_tracker
+
+try:
+    import torch
+except ImportError:
+    torch = None
 
 
 def print_time():
@@ -86,19 +93,19 @@ def parse_arguments():
     parser.add_argument(
         "--model_agg_plots",
         type=str,
-        default="o3-mini-2025-01-31",
+        default="openai/gpt-oss-120b",
         help="Model to use for plot aggregation",
     )
     parser.add_argument(
         "--model_writeup",
         type=str,
-        default="o1-preview-2024-09-12",
+        default="openai/gpt-oss-120b",
         help="Model to use for writeup",
     )
     parser.add_argument(
         "--model_citation",
         type=str,
-        default="gpt-4o-2024-11-20",
+        default="openai/gpt-oss-120b",
         help="Model to use for citation gathering",
     )
     parser.add_argument(
@@ -110,13 +117,13 @@ def parse_arguments():
     parser.add_argument(
         "--model_writeup_small",
         type=str,
-        default="gpt-4o-2024-05-13",
+        default="openai/gpt-oss-120b",
         help="Smaller model to use for writeup",
     )
     parser.add_argument(
         "--model_review",
         type=str,
-        default="gpt-4o-2024-11-20",
+        default="gpt-5.4",
         help="Model to use for review main text and captions",
     )
     parser.add_argument(
@@ -129,12 +136,66 @@ def parse_arguments():
         action="store_true",
         help="If set, skip the review process",
     )
+    parser.add_argument(
+        "--config-path",
+        type=str,
+        default="bfts_config.yaml",
+        help="Path to the BFTS config file to use for this run.",
+    )
+    parser.add_argument(
+        "--resume-checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to a previously saved stage checkpoint.pkl. "
+            "The new run will start from the next main stage after that checkpoint."
+        ),
+    )
+    parser.add_argument(
+        "--disable-http-proxy",
+        action="store_true",
+        help=(
+            "Disable HTTP proxy usage for the current process (clears *PROXY env vars and sets NO_PROXY='*'). "
+            "Leave this off if your network requires a system proxy/VPN to reach Vast.ai."
+        ),
+    )
     return parser.parse_args()
+
+
+def _normalize_resume_idea(checkpoint_path: str) -> dict:
+    checkpoint = load_stage_checkpoint(checkpoint_path)
+    task_desc = checkpoint["task_desc"]
+    if isinstance(task_desc, str):
+        task_desc = json.loads(task_desc)
+    if not isinstance(task_desc, dict):
+        raise RuntimeError(
+            f"Resume checkpoint {checkpoint_path} does not contain a JSON idea/task description."
+        )
+    return task_desc
+
+
+def _load_idea_from_args(args):
+    if args.resume_checkpoint:
+        idea = _normalize_resume_idea(args.resume_checkpoint)
+        print(
+            "Resume checkpoint provided; using the checkpoint task description "
+            f"for idea metadata: {idea.get('Name', '<unknown>')}"
+        )
+        return idea
+
+    with open(args.load_ideas, "r") as f:
+        ideas = json.load(f)
+    print(f"Loaded {len(ideas)} pregenerated ideas from {args.load_ideas}")
+    return ideas[args.idea_idx]
 
 
 def get_available_gpus(gpu_ids=None):
     if gpu_ids is not None:
         return [int(gpu_id) for gpu_id in gpu_ids.split(",")]
+    if torch is None:
+        raise RuntimeError(
+            "Local GPU execution requires PyTorch to be installed in the launcher environment."
+        )
     return list(range(torch.cuda.device_count()))
 
 
@@ -195,17 +256,16 @@ def redirect_stdout_stderr_to_file(log_file_path):
 
 if __name__ == "__main__":
     args = parse_arguments()
+    load_project_env()
+    if args.disable_http_proxy:
+        disable_http_proxy()
     os.environ["AI_SCIENTIST_ROOT"] = os.path.dirname(os.path.abspath(__file__))
     print(f"Set AI_SCIENTIST_ROOT to {os.environ['AI_SCIENTIST_ROOT']}")
 
     # Check available GPUs and adjust parallel processes if necessary
-    print(describe_execution_backend())
+    print(describe_execution_backend(args.config_path))
 
-    with open(args.load_ideas, "r") as f:
-        ideas = json.load(f)
-        print(f"Loaded {len(ideas)} pregenerated ideas from {args.load_ideas}")
-
-    idea = ideas[args.idea_idx]
+    idea = _load_idea_from_args(args)
 
     date = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     idea_dir = f"experiments/{date}_{idea['Name']}_attempt_{args.attempt_id}"
@@ -227,7 +287,7 @@ if __name__ == "__main__":
     else:
         code_path = None
 
-    idea_to_markdown(ideas[args.idea_idx], idea_path_md, code_path)
+    idea_to_markdown(idea, idea_path_md, code_path)
 
     dataset_ref_code = None
     if args.add_dataset_ref:
@@ -252,21 +312,24 @@ if __name__ == "__main__":
 
     # Add code to idea json if it was loaded
     if added_code is not None:
-        ideas[args.idea_idx]["Code"] = added_code
+        idea["Code"] = added_code
 
     # Store raw idea json
     idea_path_json = osp.join(idea_dir, "idea.json")
     with open(idea_path_json, "w") as f:
-        json.dump(ideas[args.idea_idx], f, indent=4)
+        json.dump(idea, f, indent=4)
 
-    config_path = "bfts_config.yaml"
+    config_path = args.config_path
     idea_config_path = edit_bfts_config_file(
         config_path,
         idea_dir,
         idea_path_json,
     )
 
-    perform_experiments_bfts(idea_config_path)
+    perform_experiments_bfts(
+        idea_config_path,
+        resume_checkpoint_path=args.resume_checkpoint,
+    )
     experiment_results_dir = osp.join(idea_dir, "logs/0-run/experiment_results")
     if os.path.exists(experiment_results_dir):
         shutil.copytree(

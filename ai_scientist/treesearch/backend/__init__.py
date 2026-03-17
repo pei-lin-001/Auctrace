@@ -1,6 +1,6 @@
-from . import backend_anthropic, backend_openai
+from . import backend_openai
 from .utils import FunctionSpec, OutputType, PromptType, compile_prompt_to_md
-from ai_scientist.openai_compatible import is_explicit_anthropic_model
+from ai_scientist.openai_compatible import max_output_token_limit
 
 def get_ai_client(model: str, **model_kwargs):
     """
@@ -12,10 +12,7 @@ def get_ai_client(model: str, **model_kwargs):
     Returns:
         An instance of the appropriate AI client.
     """
-    if is_explicit_anthropic_model(model):
-        return backend_anthropic.get_ai_client(model=model, **model_kwargs)
-    else:
-        return backend_openai.get_ai_client(model=model, **model_kwargs)
+    return backend_openai.get_ai_client(model=model, **model_kwargs)
 
 def query(
     system_message: PromptType | None,
@@ -23,6 +20,7 @@ def query(
     model: str,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    fallback_model: str | None = None,
     func_spec: FunctionSpec | None = None,
     **model_kwargs,
 ) -> OutputType:
@@ -31,11 +29,12 @@ def query(
     Supports function calling for some backends.
 
     Args:
-        system_message (PromptType | None): Uncompiled system message (will generate a message following the OpenAI/Anthropic format)
-        user_message (PromptType | None): Uncompiled user message (will generate a message following the OpenAI/Anthropic format)
+        system_message (PromptType | None): Uncompiled system message (will generate a message following the OpenAI format)
+        user_message (PromptType | None): Uncompiled user message (will generate a message following the OpenAI format)
         model (str): string identifier for the model to use (e.g. "gpt-4-turbo")
         temperature (float | None, optional): Temperature to sample at. Defaults to the model-specific default.
         max_tokens (int | None, optional): Maximum number of tokens to generate. Defaults to the model-specific max tokens.
+        fallback_model (str | None, optional): Optional explicit backup model on the same backend route.
         func_spec (FunctionSpec | None, optional): Optional FunctionSpec object defining a function call. If given, the return value will be a dict.
 
     Returns:
@@ -45,6 +44,7 @@ def query(
     model_kwargs = model_kwargs | {
         "model": model,
         "temperature": temperature,
+        "fallback_model": fallback_model,
     }
 
     # Handle models with beta limitations
@@ -61,14 +61,13 @@ def query(
         system_message = None
         # model_kwargs["temperature"] = 0.5
         model_kwargs["reasoning_effort"] = "high"
-        model_kwargs["max_completion_tokens"] = 100000  # max_tokens
+        model_kwargs["max_completion_tokens"] = max_tokens or max_output_token_limit()
         # remove 'temperature' from model_kwargs
         model_kwargs.pop("temperature", None)
     else:
-        model_kwargs["max_tokens"] = max_tokens
+        model_kwargs["max_tokens"] = max_tokens or max_output_token_limit()
 
-    query_func = backend_anthropic.query if is_explicit_anthropic_model(model) else backend_openai.query
-    output, req_time, in_tok_count, out_tok_count, info = query_func(
+    output, req_time, in_tok_count, out_tok_count, info = backend_openai.query(
         system_message=compile_prompt_to_md(system_message) if system_message else None,
         user_message=compile_prompt_to_md(user_message) if user_message else None,
         func_spec=func_spec,

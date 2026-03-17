@@ -6,6 +6,7 @@ import shlex
 import socket
 import subprocess
 import time
+from hashlib import sha256
 from ipaddress import ip_address
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -13,6 +14,8 @@ from typing import Any
 from .vast_common import VastRuntime, read_text_if_set
 
 DEFAULT_KEY_CANDIDATES = ("id_ed25519", "id_rsa")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+BOOTSTRAP_DIRNAME = ".auctrace_bootstrap"
 
 
 def _public_key_path(private_path: Path) -> Path:
@@ -140,6 +143,7 @@ def run_ssh(
 
 
 def run_setup_commands(runtime: VastRuntime, settings: dict[str, Any]) -> None:
+    install_project_requirements(runtime, settings)
     commands = settings["setup_commands"]
     if not commands:
         return
@@ -154,6 +158,53 @@ def run_setup_commands(runtime: VastRuntime, settings: dict[str, Any]) -> None:
     result = run_ssh(runtime, command, settings["setup_timeout"])
     if result.returncode != 0:
         raise RuntimeError(f"Vast.ai remote setup failed:\n{result.stdout}\n{result.stderr}")
+
+
+def install_project_requirements(runtime: VastRuntime, settings: dict[str, Any]) -> None:
+    if not settings["install_project_requirements"]:
+        return
+    requirements_path = (PROJECT_ROOT / settings["requirements_file"]).resolve()
+    if not requirements_path.exists():
+        raise FileNotFoundError(
+            f"Configured requirements file does not exist: {requirements_path}"
+        )
+    requirements_hash = sha256(requirements_path.read_bytes()).hexdigest()[:12]
+    remote_dir = PurePosixPath(runtime.remote_root) / BOOTSTRAP_DIRNAME
+    remote_requirements = remote_dir / f"requirements-{requirements_hash}.txt"
+    marker = remote_dir / f"requirements-{requirements_hash}.done"
+    mkdir_result = run_ssh(
+        runtime,
+        f"mkdir -p {shlex.quote(str(remote_dir))}",
+        timeout=120,
+    )
+    if mkdir_result.returncode != 0:
+        raise RuntimeError(
+            "Failed to create Vast.ai bootstrap directory:\n"
+            f"{mkdir_result.stdout}\n{mkdir_result.stderr}"
+        )
+    scp_cmd = scp_base_args(runtime) + [
+        str(requirements_path),
+        f"root@{runtime.ssh_host}:{remote_requirements}",
+    ]
+    subprocess.run(
+        scp_cmd,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=settings["pip_install_timeout"],
+    )
+    install_cmd = (
+        f"if [ ! -f {shlex.quote(str(marker))} ]; then "
+        f"python -m pip install --disable-pip-version-check --no-input "
+        f"--progress-bar off -r {shlex.quote(str(remote_requirements))} && "
+        f"touch {shlex.quote(str(marker))}; fi"
+    )
+    result = run_ssh(runtime, install_cmd, settings["pip_install_timeout"])
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Vast.ai project dependency installation failed:\n"
+            f"{result.stdout}\n{result.stderr}"
+        )
 
 
 def resolve_ssh_endpoint(client: Any, instance_id: int, instance: dict[str, Any]) -> tuple[str, int]:

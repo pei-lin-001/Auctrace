@@ -26,6 +26,7 @@ from .agent_manager import AgentManager
 from pathlib import Path
 from .agent_manager import Stage
 from .log_summarization import overall_summarize
+from .resume import build_resumed_manager
 
 
 logger = logging.getLogger("ai-scientist")
@@ -55,7 +56,10 @@ def journal_to_rich_tree(journal: Journal, cfg):
     return tree
 
 
-def perform_experiments_bfts(config_path: str):
+def perform_experiments_bfts(
+    config_path: str,
+    resume_checkpoint_path: str | None = None,
+):
     # turn config path string into a path object
     config_path = Path(config_path)
     cfg = load_cfg(config_path)
@@ -63,7 +67,6 @@ def perform_experiments_bfts(config_path: str):
 
     task_desc = load_task_desc(cfg)
     print(task_desc)
-    task_desc_str = backend.compile_prompt_to_md(task_desc)
 
     global_step = 0
 
@@ -76,11 +79,21 @@ def perform_experiments_bfts(config_path: str):
 
     atexit.register(cleanup)
 
-    manager = AgentManager(
-        task_desc=task_desc,
-        cfg=cfg,
-        workspace_dir=Path(cfg.workspace_dir),
-    )
+    if resume_checkpoint_path is None:
+        manager = AgentManager(
+            task_desc=task_desc,
+            cfg=cfg,
+            workspace_dir=Path(cfg.workspace_dir),
+        )
+    else:
+        print(f"Resuming from checkpoint: {resume_checkpoint_path}")
+        manager, task_desc = build_resumed_manager(
+            resume_checkpoint_path,
+            cfg,
+            Path(cfg.workspace_dir),
+        )
+
+    task_desc_str = backend.compile_prompt_to_md(task_desc)
 
     prog = Progress(
         TextColumn("[progress.description]{task.description}"),
@@ -123,7 +136,8 @@ def perform_experiments_bfts(config_path: str):
                     include_code=False, 
                     **{
                         "model": cfg.agent.summary.model, 
-                        "temp": cfg.agent.summary.temp
+                        "temp": cfg.agent.summary.temp,
+                        "fallback_model": cfg.agent.summary.fallback_model,
                     }
                 )
             else:

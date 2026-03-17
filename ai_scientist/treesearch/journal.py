@@ -389,21 +389,13 @@ class Journal:
     @property
     def good_nodes(self) -> list[Node]:
         """Return a list of nodes that are not considered buggy by the agent."""
-        list_of_nodes = [
-            [
-                n.step,
-                n.parent.step if n.parent else None,
-                n.id,
-                n.is_buggy,
-                n.is_buggy_plots,
-            ]
-            for n in self.nodes
-        ]
-        print(
-            f"[purple]all nodes ID and is_buggy/is_buggy_plots flags: {list_of_nodes}[/purple]"
-        )
+        # Some stages (e.g. stage 1) do not run VLM plot verification. In that case
+        # `is_buggy_plots` stays as None, and treating it as "bad" would prevent stage
+        # completion even when the implementation runs successfully.
         return [
-            n for n in self.nodes if n.is_buggy is False and n.is_buggy_plots is False
+            n
+            for n in self.nodes
+            if n.is_buggy is False and n.is_buggy_plots is not True
         ]
 
     def get_node_by_id(self, node_id: str) -> Optional[Node]:
@@ -468,17 +460,20 @@ class Journal:
 
         try:
             if cfg is None or cfg.agent.get("select_node", None) is None:
-                model = "gpt-4o"
+                model = "deepseek-chat"
                 temperature = 0.3
+                fallback_model = None
             else:
                 model = cfg.agent.select_node.model
                 temperature = cfg.agent.select_node.temp
+                fallback_model = cfg.agent.select_node.fallback_model
             selection = query(
                 system_message=prompt,
                 user_message=None,
                 func_spec=node_selection_spec,
                 model=model,
-                temperature=temperature
+                temperature=temperature,
+                fallback_model=fallback_model,
             )
 
             # Find and return the selected node
@@ -541,8 +536,9 @@ class Journal:
                 "2. Common failure patterns and pitfalls to avoid\n"
                 "3. Specific recommendations for future experiments based on both successes and failures"
             ),
-            model=model_kwargs.get("model", "gpt-4o"),
-            temperature=model_kwargs.get("temp", 0.3)
+            model=model_kwargs.get("model", "deepseek-chat"),
+            temperature=model_kwargs.get("temp", 0.3),
+            fallback_model=model_kwargs.get("fallback_model"),
         )
 
         return summary
@@ -604,8 +600,13 @@ class Journal:
         stage_summary = query(
             system_message=summary_prompt,
             user_message="Generate a comprehensive summary of the experimental findings in this stage",
-            model=cfg.agent.summary.model if cfg.agent.get("summary", None) else "gpt-4o",
-            temperature=cfg.agent.summary.temp if cfg.agent.get("summary", None) else 0.3
+            model=cfg.agent.summary.model if cfg.agent.get("summary", None) else "deepseek-chat",
+            temperature=cfg.agent.summary.temp if cfg.agent.get("summary", None) else 0.3,
+            fallback_model=(
+                cfg.agent.summary.fallback_model
+                if cfg.agent.get("summary", None)
+                else None
+            ),
         )
 
         with open(os.path.join(notes_dir, f"{stage_name}_summary.txt"), "w") as f:

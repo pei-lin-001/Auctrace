@@ -175,3 +175,7 @@ results/*
 /AGENTS.md
 /CLAUDE.md
 /.claude/
+
+# Experiment/runtime outputs (generated)
+experiments/
+.learnings/

@@ -1,0 +1,21 @@
+[
+    {
+        "Name": "failure_budget_controller",
+        "Title": "Failure-Aware Budget Control for Trustworthy Automated Research",
+        "Short Hypothesis": "If an autonomous research agent explicitly distinguishes infrastructure failures, implementation bugs, and scientifically unpromising runs, then it can spend less experimental budget on unproductive retries while preserving enough exploration to reach equally strong or better final candidates.",
+        "Related Work": "Existing automated research systems emphasize idea generation, experiment execution, and manuscript production, but they often treat repeated failures as generic signals to retry. Recent critiques of AI scientist style systems point to implementation errors, hidden instability, and misleading positive narratives, while broader work on agent reliability and auditability argues for explicit failure typing and evidence retention. This project differs by focusing on a lightweight failure-aware budget controller inside the experiment loop, with the explicit goal of improving run trace quality and reducing wasted retry behavior rather than only improving final score.",
+        "Abstract": "Autonomous research systems can now generate ideas, write code, run experiments, and draft papers, but they still behave unreliably when failures accumulate. In practice, infrastructure faults, implementation bugs, and scientifically weak directions are often mixed together, causing the system to waste budget on retry loops that produce little new evidence. We propose a small-scale study of failure-aware budget control for trustworthy automated research. The core idea is to classify failed runs into a small taxonomy, attach explicit evidence to each failure, and use those signals to decide whether the agent should debug, continue exploring, or stop. Rather than maximizing raw experimentation volume, the objective is to improve research trace quality, reduce wasted retries, and make downstream claims easier to audit. We evaluate whether a simple controller can lower wasted execution budget while preserving or improving the quality of the best surviving candidate. The expected contribution is a compact reliability mechanism that can be inserted into an existing autonomous research pipeline without replacing the search engine itself.",
+        "Experiments": [
+            "Construct a small benchmark of experiment outcomes from the tree search pipeline and label them into infra, implementation, and scientific failure categories using execution traces and artifacts.",
+            "Implement a lightweight budget controller that changes retry behavior based on failure category and compare it against the default retry policy on the same set of ideas.",
+            "Measure budget usage, number of retries, number of surviving candidates, and best final metric under both policies.",
+            "Audit a sample of run histories to compare whether the controlled policy produces clearer evidence chains and fewer ambiguous repeated failures."
+        ],
+        "Risk Factors and Limitations": [
+            "Failure labels may still be noisy because some runs contain mixed causes.",
+            "A small pilot may show improved trace quality without large gains in final task metrics.",
+            "If the controller is too conservative, it may suppress useful exploration and reduce discovery quality.",
+            "The study may depend on the stability of the current execution backend and available compute budget."
+        ]
+    }
+]

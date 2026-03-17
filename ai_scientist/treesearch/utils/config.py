@@ -39,6 +39,7 @@ class StageConfig:
     thinking: ThinkingConfig
     betas: str
     max_tokens: Optional[int] = None
+    fallback_model: Optional[str] = None
 
 
 @dataclass
@@ -244,17 +245,39 @@ def save_run(cfg: Config, journal, stage_name: str = None):
         raise
     # save the best found solution
     try:
-        best_node = journal.get_best_node(only_good=False, cfg=cfg)
+        # Prefer the best *good* node (non-buggy + plots look sane). If no good nodes
+        # exist yet, fall back to the best overall node and label it explicitly.
+        best_node = journal.get_best_node(cfg=cfg)
+        only_good_used = True
+        if best_node is None:
+            best_node = journal.get_best_node(only_good=False, cfg=cfg)
+            only_good_used = False
         if best_node is not None:
             for existing_file in save_dir.glob("best_solution_*.py"):
                 existing_file.unlink()
+            for existing_file in save_dir.glob("best_buggy_solution_*.py"):
+                existing_file.unlink()
             # Create new best solution file
-            filename = f"best_solution_{best_node.id}.py"
+            is_buggy = bool(getattr(best_node, "is_buggy", False)) or bool(
+                getattr(best_node, "is_buggy_plots", False)
+            )
+            prefix = "best_solution" if not is_buggy else "best_buggy_solution"
+            filename = f"{prefix}_{best_node.id}.py"
             with open(save_dir / filename, "w") as f:
                 f.write(best_node.code)
             # save best_node.id to a text file
             with open(save_dir / "best_node_id.txt", "w") as f:
                 f.write(str(best_node.id))
+            serialize.dump_json(
+                {
+                    "node_id": str(best_node.id),
+                    "filename": filename,
+                    "only_good_used": only_good_used,
+                    "is_buggy": is_buggy,
+                    "is_buggy_plots": bool(getattr(best_node, "is_buggy_plots", False)),
+                },
+                save_dir / "best_node.json",
+            )
         else:
             print("No best node found yet")
     except Exception as e:

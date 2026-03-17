@@ -77,6 +77,8 @@ export OPENAI_BASE_URL="https://your-compatible-endpoint/v1"
 export OPENAI_API_KEY="YOUR_COMPATIBLE_KEY"
 ```
 
+`OPENAI_API_BASE` is also accepted as an alias for `OPENAI_BASE_URL`.
+
 or the explicit aliases:
 
 ```bash
@@ -84,19 +86,30 @@ export OPENAI_COMPATIBLE_BASE_URL="https://your-compatible-endpoint/v1"
 export OPENAI_COMPATIBLE_API_KEY="YOUR_COMPATIBLE_KEY"
 ```
 
-When a compatible base URL is configured, plain model names such as `Qwen/Qwen3-32B`, `meta-llama/llama-3.1-70b-instruct`, or even compatible `claude-*` names are routed through the OpenAI-compatible endpoint instead of the hardcoded native provider routes.
+The repository also reads a local `.env` file at startup if present. To unify the token budget for the configured OpenAI-compatible models to 128k, set:
 
-#### Gemini Models
-
-By default, the system uses the `GEMINI_API_KEY` environment variable for Gemini models through OpenAI API.
-
-#### Claude Models via AWS Bedrock
-
-To use Claude models provided by Amazon Bedrock, install the necessary additional packages:
 ```bash
-pip install anthropic[bedrock]
+AI_SCIENTIST_CONTEXT_TOKENS=131072
 ```
-Next, configure valid [AWS Credentials](https://docs.aws.amazon.com/cli/v1/userguide/cli-configure-envvars.html) and the target [AWS Region](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-regions.html) by setting the following environment variables: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION_NAME`.
+
+This repository's request-side generation cap is controlled separately:
+
+```bash
+AI_SCIENTIST_MAX_OUTPUT_TOKENS=8192
+```
+
+When a compatible base URL is configured, plain model names such as `Qwen/Qwen3-32B` or `meta-llama/llama-3.1-70b-instruct` are sent through that OpenAI-compatible endpoint. This repository no longer maintains provider-specific SDK routes; if you want to use non-OpenAI models, expose them via your OpenAI-compatible gateway.
+
+For the v2 tree-search path, each stage config can now declare an explicit `fallback_model`. When the primary OpenAI-compatible model exhausts the SDK's retry budget on retryable transport/provider errors, the request is retried once on the configured fallback model and the switch is logged explicitly instead of looping forever on the original model.
+
+Example:
+
+```yaml
+agent:
+  code:
+    model: MiniMax-M2.5
+    fallback_model: nvidia/nemotron-3-super-120b-a12b
+```
 
 #### Semantic Scholar API (Literature Search)
 
@@ -109,10 +122,6 @@ Ensure you provide the necessary API keys as environment variables for the model
 export OPENAI_API_KEY="YOUR_OPENAI_KEY_HERE"
 export OPENAI_BASE_URL="https://your-compatible-endpoint/v1"  # optional, for OpenAI-compatible APIs
 export S2_API_KEY="YOUR_S2_KEY_HERE"
-# Set AWS credentials if using Bedrock
-# export AWS_ACCESS_KEY_ID="YOUR_AWS_ACCESS_KEY_ID"
-# export AWS_SECRET_ACCESS_KEY="YOUR_AWS_SECRET_KEY"
-# export AWS_REGION_NAME="your-aws-region"
 ```
 
 ## Generate Research Ideas
@@ -161,7 +170,7 @@ Key tree search configuration parameters in `bfts_config.yaml`:
     -   `debug_prob`: The probability of attempting to debug a failing node.
     -   `num_drafts`: The number of initial root nodes (i.e., the number of independent trees to grow) during Stage 1.
 
-Example command to run AI-Scientist-v2 using a generated idea file (e.g., `my_research_topic.json`). Please review `bfts_config.yaml` for detailed tree search parameters (the default config includes `claude-3-5-sonnet` for experiments). Do not set `load_code` if you do not want to initialize experimentation with a code snippet.
+Example command to run AI-Scientist-v2 using a generated idea file (e.g., `my_research_topic.json`). Please review `bfts_config.yaml` for detailed tree search parameters. Do not set `load_code` if you do not want to initialize experimentation with a code snippet.
 
 ```bash
 python launch_scientist_bfts.py \
@@ -178,6 +187,18 @@ python launch_scientist_bfts.py \
 Once the initial experimental stage is complete, you will find a timestamped log folder inside the `experiments/` directory. Navigate to `experiments/"timestamp_ideaname"/logs/0-run/` within that folder to find the tree visualization file `unified_tree_viz.html`.
 After all experiment stages are complete, the writeup stage begins. The writeup stage typically takes about 20 to 30 minutes in total. Once it finishes, you should see `timestamp_ideaname.pdf` in the `timestamp_ideaname` folder.
 For this example run, all stages typically finish within several hours.
+
+If a previous run already completed an earlier main stage and wrote a stage checkpoint, you can start a **new** run from the next main stage with:
+
+```bash
+python launch_scientist_bfts.py \
+ --config-path ".codex-tasks/my-run/formal_bfts_config.yaml" \
+ --resume-checkpoint "experiments/<previous_run>/logs/0-run/stage_2_baseline_tuning_1_first_attempt/checkpoint.pkl"
+```
+
+If `--resume-checkpoint` is provided, the launcher now uses the checkpoint's saved task description as the source of truth for idea metadata. This avoids accidentally resuming `failure_budget_controller` under an unrelated `--load_ideas/--idea_idx` combination.
+
+This does not pretend to restore the killed process in place. Instead, it loads the completed stage state, creates a fresh experiment directory, and continues from the next main stage.
 
 ## Run Experiments on Vast.ai
 
@@ -201,6 +222,8 @@ export VAST_SSH_PRIVATE_KEY_PATH="$HOME/.ssh/id_ed25519"
 export VAST_SSH_PUBLIC_KEY_PATH="$HOME/.ssh/id_ed25519.pub"
 ```
 
+The launcher and Vast backend also read these keys from the repository-local `.env` file if present, using the same `os.environ.setdefault(...)` precedence as the OpenAI-compatible path.
+
 If the environment variables are omitted, the backend will explicitly look for a local keypair in `~/.ssh/id_ed25519(.pub)` and then `~/.ssh/id_rsa(.pub)`. Vast.ai account-side key labels alone are not enough for unattended remote execution; the backend must have access to a real local public key to attach and, unless you rely on `ssh-agent`, the matching private key for the health probe and remote execution.
 
 ### Enable the backend
@@ -222,15 +245,20 @@ Key Vast.ai options live under `exec.vast`, including:
 - `instance_poll_interval`: polling interval while waiting for the instance to boot
 - `ssh_probe_*`: retries and timeouts for the explicit SSH health check
 - `search.*`: offer filtering such as `num_gpus`, `reliability_min`, and `direct_port_count_min`
+- `install_project_requirements`: whether to upload the local `requirements.txt` and install it once per remote image hash
+- `requirements_file`: local requirements file to bootstrap on the Vast instance
+- `pip_install_timeout`: timeout for the remote dependency installation step
+- `auto_install_missing_packages`: whether to catch remote `ModuleNotFoundError` / `ImportError`, install the missing package, and retry the same execution
+- `max_auto_dependency_installs`: cap on automatic dependency installs per execution attempt
 - `setup_commands`: optional one-time remote setup commands
 - `auto_destroy`: whether to destroy the instance on cleanup
 
 ### Notes
 
 - The remote execution path syncs each worker workspace to the Vast.ai instance, runs the generated code remotely, then syncs artifacts back to the local `experiments/` directory.
-- The integration assumes your chosen Vast.ai image already contains the scientific Python stack you need, or that you provide it through `setup_commands`.
+- By default the backend now bootstraps the remote Python environment from the repo's `requirements.txt` before the first worker runs. `setup_commands` remain available for extra system or project-specific setup.
 - The backend treats the **lowest-cost healthy** offer as the target. If an offer boots into a broken host state, never exposes a usable SSH banner, or closes SSH during key exchange, that instance is destroyed and the next low-cost offer is tried explicitly.
-- If a required package is missing remotely, the run will fail explicitly rather than silently falling back to local execution.
+- If a required Python package is still missing remotely, the Vast execution path now retries explicitly: it logs the missing module, installs the mapped pip package on the active instance, and reruns the same code. If installation fails, the error still surfaces explicitly and the run does not silently fall back to local execution.
 
 ## Citing The AI Scientist-v2
 

@@ -11,6 +11,7 @@ import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .dependency_resolution import extract_missing_module, package_name_for_module
 from .interpreter import ExecutionResult
 from .vast_common import VastRuntime, cfg_value
 from .vast_ssh import run_ssh, scp_base_args
@@ -48,6 +49,9 @@ try:
 except BaseException as exc:
     payload["exc_type"] = exc.__class__.__name__
     payload["exc_info"] = {{"args": [str(arg) for arg in getattr(exc, "args", [])]}}
+    for attr in ("name", "msg", "obj"):
+        if hasattr(exc, attr):
+            payload["exc_info"][attr] = str(getattr(exc, attr))
     payload["exc_stack"] = [[t.filename, t.lineno, t.name, t.line] for t in traceback.extract_tb(exc.__traceback__)]
     traceback.print_exc()
 finally:
@@ -81,6 +85,13 @@ class VastRemoteInterpreter:
         self.run_name = run_name
         self.gpu_id = gpu_id
         self.env_vars = env_vars or {}
+        self.auto_install_missing_packages = cfg_value(
+            vast_cfg, "auto_install_missing_packages", True
+        )
+        self.max_auto_dependency_installs = cfg_value(
+            vast_cfg, "max_auto_dependency_installs", 3
+        )
+        self.pip_install_timeout = cfg_value(vast_cfg, "pip_install_timeout", 1800)
 
     def cleanup_session(self) -> None:
         return None
@@ -93,9 +104,15 @@ class VastRemoteInterpreter:
         remote_workspace = (
             PurePosixPath(self.runtime.remote_root) / self.run_name / self.working_dir.name
         )
+        install_logs: list[str] = []
+        attempted_packages: set[str] = set()
         try:
             self.sync_to_remote(remote_workspace)
-            completed = self.run_remote(remote_workspace)
+            result = self._run_with_dependency_recovery(
+                remote_workspace,
+                install_logs,
+                attempted_packages,
+            )
         except subprocess.TimeoutExpired as exc:
             return ExecutionResult(term_out=[str(exc)], exec_time=self.timeout, exc_type="TimeoutError")
         except Exception as exc:
@@ -110,7 +127,73 @@ class VastRemoteInterpreter:
                 self.sync_from_remote(remote_workspace)
             except Exception:
                 pass
-        return self.parse_result(completed)
+        result.term_out.extend(install_logs)
+        return result
+
+    def _run_with_dependency_recovery(
+        self,
+        remote_workspace: PurePosixPath,
+        install_logs: list[str],
+        attempted_packages: set[str],
+    ) -> ExecutionResult:
+        while True:
+            completed = self.run_remote(remote_workspace)
+            result = self.parse_result(completed)
+            module_name = extract_missing_module(
+                result.exc_type,
+                result.exc_info,
+                result.term_out,
+            )
+            if not self._should_auto_install(module_name, attempted_packages):
+                return result
+            package_name = package_name_for_module(module_name)
+            install_logs.append(
+                "[AUCTRACE_AUTO_INSTALL] "
+                f"Detected missing Python module '{module_name}'. "
+                f"Installing package '{package_name}' on Vast and retrying."
+            )
+            try:
+                self._install_missing_package(remote_workspace, package_name)
+            except Exception as exc:
+                result.term_out.extend(install_logs)
+                result.term_out.append(
+                    "[AUCTRACE_AUTO_INSTALL] "
+                    f"Failed to install '{package_name}': {exc}"
+                )
+                result.exc_type = "DependencyInstallError"
+                result.exc_info = {
+                    "missing_module": module_name,
+                    "package_name": package_name,
+                    "install_error": str(exc),
+                }
+                return result
+            attempted_packages.add(package_name)
+
+    def _should_auto_install(
+        self,
+        module_name: str | None,
+        attempted_packages: set[str],
+    ) -> bool:
+        if not self.auto_install_missing_packages or module_name is None:
+            return False
+        if len(attempted_packages) >= self.max_auto_dependency_installs:
+            return False
+        package_name = package_name_for_module(module_name)
+        return package_name not in attempted_packages
+
+    def _install_missing_package(
+        self,
+        remote_workspace: PurePosixPath,
+        package_name: str,
+    ) -> None:
+        command = (
+            f"cd {shlex.quote(str(remote_workspace))} && "
+            "python -m pip install --disable-pip-version-check "
+            f"--no-input --progress-bar off {shlex.quote(package_name)}"
+        )
+        completed = run_ssh(self.runtime, command, self.pip_install_timeout)
+        if completed.returncode != 0:
+            raise RuntimeError(f"{completed.stdout}\n{completed.stderr}".strip())
 
     def run_remote(self, remote_workspace: PurePosixPath) -> subprocess.CompletedProcess:
         env_parts = [f"CUDA_VISIBLE_DEVICES={self.gpu_id}"] if self.gpu_id is not None else []

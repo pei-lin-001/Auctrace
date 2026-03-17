@@ -1,5 +1,4 @@
 # LLM APIs
-anthropic
 backoff
 openai
 vastai-sdk
@@ -10,6 +9,7 @@ pymupdf4llm
 seaborn
 # Common Requirements
 numpy
+scikit-learn
 transformers
 datasets
 tiktoken
@@ -26,5 +26,3 @@ python-igraph
 coolname
 jsonschema
 omegaconf
-botocore
-boto3

@@ -272,7 +272,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default="gpt-4o-2024-05-13",
+        default="deepseek-chat",
         help="Model to use for AI Scientist. Supports direct providers and arbitrary OpenAI-compatible model names.",
     )
     parser.add_argument(
