@@ -18,11 +18,13 @@ from ai_scientist.perform_plotting import aggregate_plots
 from ai_scientist.perform_vlm_review import perform_imgs_cap_ref_review
 from ai_scientist.project_env import load_project_env
 from ai_scientist.treesearch.log_summarization import overall_summarize
+from ai_scientist.env_utils import env_int, env_str, load_env
 
 DEFAULT_LOG_DIR = Path("logs") / "0-run"
 
 
 def _parse_args() -> argparse.Namespace:
+    load_env()
     parser = argparse.ArgumentParser(
         description=(
             "Postprocess an existing experiments/<timestamp>_<idea>_attempt_<id> folder "
@@ -41,39 +43,39 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model_agg_plots",
-        default="openai/gpt-oss-120b",
+        default=env_str("AI_SCIENTIST_MODEL_AGG_PLOTS", "openai/gpt-oss-120b"),
         help="Model for plot aggregation script generation.",
     )
     parser.add_argument(
         "--model_citation",
-        default="openai/gpt-oss-120b",
+        default=env_str("AI_SCIENTIST_MODEL_CITATION", "openai/gpt-oss-120b"),
         help="Model for citation gathering.",
     )
     parser.add_argument(
         "--model_writeup",
-        default="openai/gpt-oss-120b",
+        default=env_str("AI_SCIENTIST_MODEL_WRITEUP", "openai/gpt-oss-120b"),
         help="Model for LaTeX writeup (text).",
     )
     parser.add_argument(
         "--model_writeup_small",
-        default="gpt-5.4",
+        default=env_str("AI_SCIENTIST_MODEL_WRITEUP_SMALL", "gpt-5.4"),
         help="Model for VLM steps inside writeup (must support images).",
     )
     parser.add_argument(
         "--model_review",
-        default="gpt-5.4",
+        default=env_str("AI_SCIENTIST_MODEL_REVIEW", "gpt-5.4"),
         help="Model for review (text + VLM review).",
     )
     parser.add_argument(
         "--num_cite_rounds",
         type=int,
-        default=20,
+        default=env_int("AI_SCIENTIST_NUM_CITE_ROUNDS", 20),
         help="Number of citation gathering rounds.",
     )
     parser.add_argument(
         "--plot_reflections",
         type=int,
-        default=5,
+        default=env_int("AI_SCIENTIST_PLOT_REFLECTIONS", 5),
         help="Number of reflection loops for plot aggregation.",
     )
     parser.add_argument(
@@ -223,4 +225,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

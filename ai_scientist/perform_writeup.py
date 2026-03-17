@@ -760,32 +760,39 @@ If you believe you are done, simply say: "I am done".
 
 
 if __name__ == "__main__":
+    from ai_scientist.env_utils import env_int, env_str, load_env
+
+    load_env()
     parser = argparse.ArgumentParser(description="Perform writeup for a project")
     parser.add_argument("--folder", type=str, help="Project folder", required=True)
     parser.add_argument("--no-writing", action="store_true", help="Only generate")
-    parser.add_argument("--num-cite-rounds", type=int, default=20)
+    parser.add_argument(
+        "--num-cite-rounds",
+        type=int,
+        default=env_int("AI_SCIENTIST_NUM_CITE_ROUNDS", 20),
+    )
     parser.add_argument(
         "--model",
         type=str,
-        default="deepseek-chat",
+        default=env_str("AI_SCIENTIST_MODEL_CITATION", "deepseek-chat"),
         help="Model to use for citation collection (small model). Supports arbitrary OpenAI-compatible model names.",
     )
     parser.add_argument(
         "--big-model",
         type=str,
-        default="deepseek-chat",
+        default=env_str("AI_SCIENTIST_MODEL_WRITEUP", "deepseek-chat"),
         help="Model to use for final writeup (big model). Supports arbitrary OpenAI-compatible model names.",
     )
     parser.add_argument(
         "--writeup-reflections",
         type=int,
-        default=3,
+        default=env_int("AI_SCIENTIST_WRITEUP_REFLECTIONS", 3),
         help="Number of reflection steps for the final LaTeX writeup.",
     )
     parser.add_argument(
         "--page-limit",
         type=int,
-        default=8,
+        default=env_int("AI_SCIENTIST_WRITEUP_PAGE_LIMIT", 8),
         help="Target page limit for the main paper (excluding references, impact statement, etc.)",
     )
     args = parser.parse_args()

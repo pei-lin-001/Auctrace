@@ -29,6 +29,7 @@ from ai_scientist.perform_icbinb_writeup import (
 from ai_scientist.perform_llm_review import perform_review, load_paper
 from ai_scientist.perform_vlm_review import perform_imgs_cap_ref_review
 from ai_scientist.utils.token_tracker import token_tracker
+from ai_scientist.env_utils import env_int, env_str, load_env
 
 try:
     import torch
@@ -48,18 +49,22 @@ def save_token_tracker(idea_dir):
 
 
 def parse_arguments():
+    load_env()
     parser = argparse.ArgumentParser(description="Run AI scientist experiments")
     parser.add_argument(
         "--writeup-type",
         type=str,
-        default="icbinb",
+        default=env_str("AI_SCIENTIST_WRITEUP_TYPE", "icbinb"),
         choices=["normal", "icbinb"],
         help="Type of writeup to generate (normal=8 page, icbinb=4 page)",
     )
     parser.add_argument(
         "--load_ideas",
         type=str,
-        default="ideas/i_cant_believe_its_not_better.json",
+        default=env_str(
+            "AI_SCIENTIST_IDEAS_PATH",
+            "ai_scientist/ideas/i_cant_believe_its_not_better.json",
+        ),
         help="Path to a JSON file containing pregenerated ideas",
     )
     parser.add_argument(
@@ -70,7 +75,7 @@ def parse_arguments():
     parser.add_argument(
         "--idea_idx",
         type=int,
-        default=0,
+        default=env_int("AI_SCIENTIST_IDEA_IDX", 0),
         help="Index of the idea to run",
     )
     parser.add_argument(
@@ -81,49 +86,55 @@ def parse_arguments():
     parser.add_argument(
         "--writeup-retries",
         type=int,
-        default=3,
+        default=env_int("AI_SCIENTIST_WRITEUP_RETRIES", 3),
         help="Number of writeup attempts to try",
     )
     parser.add_argument(
         "--attempt_id",
         type=int,
-        default=0,
+        default=env_int("AI_SCIENTIST_ATTEMPT_ID", 0),
         help="Attempt ID, used to distinguish same idea in different attempts in parallel runs",
     )
     parser.add_argument(
         "--model_agg_plots",
         type=str,
-        default="openai/gpt-oss-120b",
+        default=env_str("AI_SCIENTIST_MODEL_AGG_PLOTS", "openai/gpt-oss-120b"),
         help="Model to use for plot aggregation",
+    )
+    parser.add_argument(
+        "--plot-reflections",
+        type=int,
+        default=env_int("AI_SCIENTIST_PLOT_REFLECTIONS", 5),
+        help="Number of reflection loops for plot aggregation.",
     )
     parser.add_argument(
         "--model_writeup",
         type=str,
-        default="openai/gpt-oss-120b",
+        default=env_str("AI_SCIENTIST_MODEL_WRITEUP", "openai/gpt-oss-120b"),
         help="Model to use for writeup",
     )
     parser.add_argument(
         "--model_citation",
         type=str,
-        default="openai/gpt-oss-120b",
+        default=env_str("AI_SCIENTIST_MODEL_CITATION", "openai/gpt-oss-120b"),
         help="Model to use for citation gathering",
     )
     parser.add_argument(
         "--num_cite_rounds",
         type=int,
-        default=20,
+        default=env_int("AI_SCIENTIST_NUM_CITE_ROUNDS", 20),
         help="Number of citation rounds to perform",
     )
     parser.add_argument(
         "--model_writeup_small",
         type=str,
-        default="openai/gpt-oss-120b",
+        default=env_str("AI_SCIENTIST_MODEL_WRITEUP_SMALL", "gpt-5.4"),
         help="Smaller model to use for writeup",
     )
     parser.add_argument(
         "--model_review",
         type=str,
-        default="gpt-5.4",
+        default=env_str("AI_SCIENTIST_MODEL_REVIEW", "gpt-5.4"),
         help="Model to use for review main text and captions",
     )
     parser.add_argument(
@@ -139,7 +150,7 @@ def parse_arguments():
     parser.add_argument(
         "--config-path",
         type=str,
-        default="bfts_config.yaml",
+        default=env_str("AI_SCIENTIST_BFTS_CONFIG_PATH", "bfts_config.yaml"),
         help="Path to the BFTS config file to use for this run.",
     )
     parser.add_argument(
@@ -338,7 +349,11 @@ if __name__ == "__main__":
             dirs_exist_ok=True,
         )
 
-    aggregate_plots(base_folder=idea_dir, model=args.model_agg_plots)
+    aggregate_plots(
+        base_folder=idea_dir,
+        model=args.model_agg_plots,
+        n_reflections=args.plot_reflections,
+    )
 
     shutil.rmtree(osp.join(idea_dir, "experiment_results"))
 

@@ -255,6 +255,9 @@ If you believe you are done, simply say: "I am done". Otherwise, please provide 
 
 
 def main():
+    from ai_scientist.env_utils import env_int, env_str, load_env
+
+    load_env()
     parser = argparse.ArgumentParser(
         description="Generate and execute a final plot aggregation script with LLM assistance."
     )
@@ -265,13 +268,13 @@ def main():
     )
     parser.add_argument(
         "--model",
-        default="deepseek-chat",
+        default=env_str("AI_SCIENTIST_MODEL_AGG_PLOTS", "deepseek-chat"),
         help="LLM model to use (default: deepseek-chat).",
     )
     parser.add_argument(
         "--reflections",
         type=int,
-        default=5,
+        default=env_int("AI_SCIENTIST_PLOT_REFLECTIONS", 5),
         help="Number of reflection steps to attempt (default: 5).",
     )
     args = parser.parse_args()

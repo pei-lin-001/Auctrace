@@ -16,19 +16,19 @@ exp_name: run # a random experiment name will be generated if not provided
 
 # settings for code execution
 exec:
-  backend: vast
-  timeout: 3600
+  backend: ${oc.env:AI_SCIENTIST_EXEC_BACKEND,vast}
+  timeout: ${oc.env:AI_SCIENTIST_EXEC_TIMEOUT,3600}
   agent_file_name: runfile.py
   format_tb_ipython: False
   vast:
     api_key_env: VAST_API_KEY
     private_ssh_key_path_env: VAST_SSH_PRIVATE_KEY_PATH
     public_ssh_key_path_env: VAST_SSH_PUBLIC_KEY_PATH
-    existing_instance_id: null
-    offer_id: null
-    auto_destroy: true
-    readiness_timeout: 900
-    setup_timeout: 1800
+    existing_instance_id: ${oc.env:AI_SCIENTIST_VAST_EXISTING_INSTANCE_ID,null}
+    offer_id: ${oc.env:AI_SCIENTIST_VAST_OFFER_ID,null}
+    auto_destroy: ${oc.env:AI_SCIENTIST_VAST_AUTO_DESTROY,true}
+    readiness_timeout: ${oc.env:AI_SCIENTIST_VAST_READINESS_TIMEOUT,900}
+    setup_timeout: ${oc.env:AI_SCIENTIST_VAST_SETUP_TIMEOUT,1800}
     instance_poll_interval: 10
     max_provision_attempts: 3
     ssh_probe_retries: 6
@@ -47,21 +47,21 @@ exec:
     max_auto_dependency_installs: 3
     setup_commands: []
     search:
-      limit: 25
-      order: dph_total
-      type: on-demand
-      verified: true
-      rentable: true
-      rented: false
-      num_gpus: 1
-      reliability_min: 0.95
-      inet_up_min: 100
-      direct_port_count_min: 1
+      limit: ${oc.env:AI_SCIENTIST_VAST_SEARCH_LIMIT,25}
+      order: ${oc.env:AI_SCIENTIST_VAST_SEARCH_ORDER,dph_total}
+      type: ${oc.env:AI_SCIENTIST_VAST_SEARCH_TYPE,on-demand}
+      verified: ${oc.env:AI_SCIENTIST_VAST_SEARCH_VERIFIED,true}
+      rentable: ${oc.env:AI_SCIENTIST_VAST_SEARCH_RENTABLE,true}
+      rented: ${oc.env:AI_SCIENTIST_VAST_SEARCH_RENTED,false}
+      num_gpus: ${oc.env:AI_SCIENTIST_VAST_SEARCH_NUM_GPUS,1}
+      reliability_min: ${oc.env:AI_SCIENTIST_VAST_SEARCH_RELIABILITY_MIN,0.95}
+      inet_up_min: ${oc.env:AI_SCIENTIST_VAST_SEARCH_INET_UP_MIN,100}
+      direct_port_count_min: ${oc.env:AI_SCIENTIST_VAST_SEARCH_DIRECT_PORT_COUNT_MIN,1}
 
 generate_report: True
 # LLM settings for final report from journal
 report:
-  model: "openai/gpt-oss-120b"
+  model: ${oc.env:AI_SCIENTIST_MODEL_REPORT,openai/gpt-oss-120b}
   fallback_model: null
   temp: 1.0
 
@@ -74,7 +74,7 @@ debug:
 # agent hyperparams
 agent:
   type: parallel
-  num_workers: 4
+  num_workers: ${oc.env:AI_SCIENTIST_NUM_WORKERS,4}
   stages:
     stage1_max_iters: 20
     stage2_max_iters: 12
@@ -93,20 +93,20 @@ agent:
 
   # LLM settings for coding ??? strongest coding model
   code:
-    model: "openai/gpt-oss-120b"
+    model: ${oc.env:AI_SCIENTIST_MODEL_CODE,openai/gpt-oss-120b}
     fallback_model: null
     temp: 1.0
     max_tokens: 12000
 
   # LLM settings for evaluating program output / tracebacks
   feedback:
-    model: "gpt-5.4"
+    model: ${oc.env:AI_SCIENTIST_MODEL_FEEDBACK,gpt-5.4}
     fallback_model: null
     temp: 0.5
     max_tokens: 8192
 
   vlm_feedback:
-    model: "gpt-5.4"
+    model: ${oc.env:AI_SCIENTIST_MODEL_VLM_FEEDBACK,gpt-5.4}
     fallback_model: null
     temp: 0.5
     max_tokens: null
@@ -120,11 +120,11 @@ agent:
   # If not specified, the default behavior will be used.
 
   summary:
-    model: "openai/gpt-oss-120b"
+    model: ${oc.env:AI_SCIENTIST_MODEL_SUMMARY,openai/gpt-oss-120b}
     fallback_model: null
     temp: 0.3
 
   select_node:
-    model: "gpt-5.4"
+    model: ${oc.env:AI_SCIENTIST_MODEL_SELECT_NODE,gpt-5.4}
     fallback_model: null
     temp: 0.3

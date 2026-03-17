@@ -266,31 +266,37 @@ def generate_temp_free_idea(
 
 
 if __name__ == "__main__":
+    from ai_scientist.env_utils import env_int, env_str, load_env
+
+    load_env()
     parser = argparse.ArgumentParser(
         description="Generate AI scientist proposals - template free"
     )
     parser.add_argument(
         "--model",
         type=str,
-        default="deepseek-chat",
+        default=env_str("AI_SCIENTIST_MODEL_IDEATION", "deepseek-chat"),
         help="Model to use for AI Scientist. Supports direct providers and arbitrary OpenAI-compatible model names.",
     )
     parser.add_argument(
         "--max-num-generations",
         type=int,
-        default=1,
+        default=env_int("AI_SCIENTIST_MAX_NUM_GENERATIONS", 1),
         help="Maximum number of proposal generations.",
     )
     parser.add_argument(
         "--workshop-file",
         type=str,
-        default="ideas/i_cant_believe_its_not_better.md",
+        default=env_str(
+            "AI_SCIENTIST_WORKSHOP_FILE",
+            "ai_scientist/ideas/i_cant_believe_its_not_better.md",
+        ),
         help="Path to the workshop description file.",
     )
     parser.add_argument(
         "--num-reflections",
         type=int,
-        default=5,
+        default=env_int("AI_SCIENTIST_IDEATION_REFLECTIONS", 5),
         help="Number of reflection rounds per proposal.",
     )
     args = parser.parse_args()
