@@ -27,6 +27,10 @@ from ai_scientist.perform_vlm_review import (
     detect_duplicate_figures,
 )
 from ai_scientist.vlm import create_client as create_vlm_client
+from ai_scientist.latex_sanitize import (
+    ensure_tex_has_end_document,
+    sanitize_tex_file_for_pdflatex,
+)
 
 
 def remove_accents_and_clean(s):
@@ -41,8 +45,61 @@ def remove_accents_and_clean(s):
     return ascii_str
 
 
+def _sanitize_template_tex_for_pdflatex(cwd: str) -> None:
+    try:
+        tex_path = osp.join(cwd, "template.tex")
+        if ensure_tex_has_end_document(tex_path):
+            print("[latex] appended missing \\end{document} to template.tex")
+        report = sanitize_tex_file_for_pdflatex(tex_path)
+        if not report.changed:
+            return
+        changed_keys = [
+            f"U+{ord(ch):04X}x{count}" for ch, count in report.replacements.items()
+        ]
+        print(
+            "[latex] sanitized template.tex for pdflatex unicode compatibility: "
+            + ", ".join(changed_keys)
+        )
+        if report.remaining_non_ascii:
+            remaining = ", ".join(
+                sorted({f"U+{ord(ch):04X}" for ch in report.remaining_non_ascii})
+            )
+            print(f"[latex] warning: template.tex still contains non-ascii: {remaining}")
+    except Exception:
+        print("EXCEPTION in compile_latex while sanitizing template.tex:")
+        print(traceback.format_exc())
+
+
+def _run_latex_command(command: list[str], cwd: str, timeout: int) -> None:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode != 0:
+            print(
+                f"EXCEPTION in compile_latex: command failed (returncode={result.returncode}): "
+                f"{' '.join(command)}"
+            )
+        print("Standard Output:\n", result.stdout)
+        print("Standard Error:\n", result.stderr)
+    except subprocess.TimeoutExpired:
+        print(f"EXCEPTION in compile_latex: LaTeX timed out after {timeout} seconds.")
+        print(traceback.format_exc())
+    except subprocess.CalledProcessError:
+        print(
+            f"EXCEPTION in compile_latex: Error running command {' '.join(command)}"
+        )
+        print(traceback.format_exc())
+
+
 def compile_latex(cwd, pdf_file, timeout=30):
     print("GENERATING LATEX")
+    _sanitize_template_tex_for_pdflatex(cwd)
 
     commands = [
         ["pdflatex", "-interaction=nonstopmode", "template.tex"],
@@ -52,27 +109,7 @@ def compile_latex(cwd, pdf_file, timeout=30):
     ]
 
     for command in commands:
-        try:
-            result = subprocess.run(
-                command,
-                cwd=cwd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                timeout=timeout,
-            )
-            print("Standard Output:\n", result.stdout)
-            print("Standard Error:\n", result.stderr)
-        except subprocess.TimeoutExpired:
-            print(
-                f"EXCEPTION in compile_latex: LaTeX timed out after {timeout} seconds."
-            )
-            print(traceback.format_exc())
-        except subprocess.CalledProcessError:
-            print(
-                f"EXCEPTION in compile_latex: Error running command {' '.join(command)}"
-            )
-            print(traceback.format_exc())
+        _run_latex_command(command, cwd=cwd, timeout=timeout)
 
     print("FINISHED GENERATING LATEX")
 
