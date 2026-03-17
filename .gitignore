@@ -8,15 +8,7 @@ __pycache__/
 
 # Distribution / packaging
 .Python
-# NOTE: This repo intentionally keeps planning docs under `build/` (see `build/*.md`).
-# Keep `build/` artifacts ignored by default, but allow tracking Markdown docs in it.
 build/
-!build/
-build/*
-!build/*.md
-!build/实验记录/
-build/实验记录/*
-!build/实验记录/*.md
 develop-eggs/
 dist/
 downloads/
