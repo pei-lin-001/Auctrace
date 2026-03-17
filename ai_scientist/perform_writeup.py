@@ -21,6 +21,7 @@ from ai_scientist.perform_vlm_review import generate_vlm_img_review
 from ai_scientist.vlm import create_client as create_vlm_client
 from ai_scientist.latex_sanitize import (
     ensure_tex_has_end_document,
+    ensure_tex_uses_references_bibliography,
     sanitize_tex_file_for_pdflatex,
 )
 
@@ -44,6 +45,12 @@ def _sanitize_template_tex_for_pdflatex(cwd: str) -> None:
         tex_path = osp.join(cwd, "template.tex")
         if ensure_tex_has_end_document(tex_path):
             print("[latex] appended missing \\end{document} to template.tex")
+        if ensure_tex_uses_references_bibliography(tex_path):
+            print("[latex] normalized bibliography database to references.bib")
+        references_bib_path = osp.join(cwd, "references.bib")
+        if osp.exists(references_bib_path):
+            os.remove(references_bib_path)
+            print("[latex] removed stale references.bib to force regeneration from filecontents")
         report = sanitize_tex_file_for_pdflatex(tex_path)
         if not report.changed:
             return

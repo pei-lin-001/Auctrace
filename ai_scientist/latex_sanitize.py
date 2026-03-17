@@ -97,3 +97,21 @@ def ensure_tex_has_end_document(tex_path: str | Path) -> bool:
         suffix = "\n" + suffix
     path.write_text(text + suffix, encoding="utf-8")
     return True
+
+
+def ensure_tex_uses_references_bibliography(tex_path: str | Path) -> bool:
+    """Normalize bibliography database to 'references' when present.
+
+    The ICLR template ships with 'iclr2025.bib' as an example database, but our
+    pipeline collects citations into a generated references.bib. If the model
+    outputs \\bibliography{iclr2025}, citations will show as '??' despite being
+    present in references.bib.
+    """
+    path = Path(tex_path)
+    text = path.read_text(encoding="utf-8", errors="strict")
+    needle = "\\bibliography{iclr2025}"
+    if needle not in text:
+        return False
+    text = text.replace(needle, "\\bibliography{references}")
+    path.write_text(text, encoding="utf-8")
+    return True

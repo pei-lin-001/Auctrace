@@ -166,6 +166,7 @@ cython_debug/
 
 # Misc folders
 data/
+tmp/
 *ckpt.pt
 *.zip
 ICLR2022-OpenReviewData/
