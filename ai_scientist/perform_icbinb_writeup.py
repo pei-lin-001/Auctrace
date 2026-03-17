@@ -791,6 +791,7 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="deepseek-chat
 
         for round_idx in range(current_round, num_cite_rounds):
             try:
+                print(f"[citations] round {round_idx + 1}/{num_cite_rounds}")
                 context_for_citation = (filtered_summaries_str, citations_text)
                 addition, done = get_citation_addition(
                     client,
@@ -834,6 +835,47 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="deepseek-chat
                                     },
                                     f,
                                 )
+                        else:
+                            print("[citations] skipped duplicate title; no update applied.")
+                            with open(citations_cache_path, "w") as f:
+                                f.write(citations_text)
+                            with open(progress_path, "w") as f:
+                                json.dump(
+                                    {
+                                        "completed_rounds": round_idx + 1,
+                                        "status": "in_progress",
+                                        "last_round": "duplicate_title",
+                                    },
+                                    f,
+                                )
+                    else:
+                        citations_text += "\n" + addition
+                        with open(citations_cache_path, "w") as f:
+                            f.write(citations_text)
+                        with open(progress_path, "w") as f:
+                            json.dump(
+                                {
+                                    "completed_rounds": round_idx + 1,
+                                    "status": "in_progress",
+                                    "last_round": "added_no_title_field",
+                                },
+                                f,
+                            )
+                else:
+                    # No citations added in this round. Still persist progress so resume does not
+                    # repeatedly restart from the same round.
+                    print("[citations] no suitable papers selected; continuing.")
+                    with open(citations_cache_path, "w") as f:
+                        f.write(citations_text)
+                    with open(progress_path, "w") as f:
+                        json.dump(
+                            {
+                                "completed_rounds": round_idx + 1,
+                                "status": "in_progress",
+                                "last_round": "no_addition",
+                            },
+                            f,
+                        )
 
             except Exception as e:
                 print(f"Error in citation round {round_idx}: {e}")
