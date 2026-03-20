@@ -11,6 +11,7 @@ from .interpreter import ExecutionResult
 from .journal import Journal, Node
 from .utils import data_preview
 from .utils.config import Config
+from .utils.experiment_metrics import extract_metrics_payload
 from .utils.metric import MetricValue, WorstMetricValue
 from .utils.response import extract_code, extract_text_up_to_code, wrap_code
 import copy
@@ -19,6 +20,7 @@ from dataclasses import asdict
 from omegaconf import OmegaConf
 from .execution_backends import create_interpreter
 from .vast_api import cleanup_vast_runtime, prepare_vast_runtime
+from .wsl_ssh_api import cleanup_wsl_ssh_runtime, prepare_wsl_ssh_runtime
 from .worker_failures import (
     build_retryable_llm_failure_node,
     is_infra_failure_node,
@@ -50,21 +52,19 @@ def _parse_keyword_prefix_response(
 ) -> Tuple[Optional[str], Optional[str]]:
     """Parse the response into name and description based on keyword prefix"""
     try:
-        # Split response into lines and clean up
-        lines = [line.strip() for line in response.split("\n") if line.strip()]
+        lines = [_normalize_keyword_response_line(line) for line in response.split("\n")]
+        lines = [line for line in lines if line]
 
-        # Find the idea and description
         name = None
         description = None
 
-        for line in lines:
+        for idx, line in enumerate(lines):
             if line.startswith(keyword_prefix1):
                 name = line.replace(keyword_prefix1, "").strip()
             elif line.startswith(keyword_prefix2):
                 description = line.replace(keyword_prefix2, "").strip()
-                # Combine any following lines that don't start with a marker
                 desc_lines = []
-                for next_line in lines[lines.index(line) + 1 :]:
+                for next_line in lines[idx + 1 :]:
                     if not next_line.startswith((keyword_prefix1, keyword_prefix2)):
                         desc_lines.append(next_line)
                     else:
@@ -83,6 +83,16 @@ def _parse_keyword_prefix_response(
         logger.error(f"Error parsing response: {str(e)}")
         logger.debug(f"Raw response: {response}")
         return None, None
+
+
+def _normalize_keyword_response_line(line: str) -> str:
+    cleaned = line.strip()
+    if not cleaned:
+        return ""
+    cleaned = cleaned.lstrip("-*• ").strip()
+    cleaned = cleaned.replace("**", "").replace("__", "")
+    cleaned = cleaned.replace("`", "")
+    return cleaned
 
 
 review_func_spec = FunctionSpec(
@@ -137,75 +147,6 @@ vlm_feedback_spec = FunctionSpec(
         "required": ["plot_analyses", "valid_plots_received", "vlm_feedback_summary"],
     },
     description="Analyze experimental plots and provide detailed feedback on the results.",
-)
-
-metric_parse_spec = FunctionSpec(
-    name="parse_metrics",
-    json_schema={
-        "type": "object",
-        "strict": True,
-        "properties": {
-            "valid_metrics_received": {
-                "type": "boolean",
-                "description": "True if the metrics were successfully received, False otherwise. For example if the execution output does not contain any metrics, set this to False.",
-            },
-            "metric_names": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "metric_name": {
-                            "type": "string",
-                            "description": "Specify the metric name clearly. Avoid vague terms like 'train,' 'val,' or 'test.' Instead, use precise labels such as 'train accuracy,' 'validation loss,' or 'test F1 score,' etc.",
-                        },
-                        "lower_is_better": {
-                            "type": "boolean",
-                            "description": "Whether lower values are better for this metric",
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Description of the metric",
-                        },
-                        "data": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "dataset_name": {
-                                        "type": "string",
-                                        "description": "The name of the dataset. Never include 'train', 'val', or 'test' in the dataset name.",
-                                    },
-                                    "final_value": {
-                                        "type": "number",
-                                        "description": "The final value of the metric for this dataset",
-                                    },
-                                    "best_value": {
-                                        "type": "number",
-                                        "description": "The best value of the metric for this dataset",
-                                    },
-                                },
-                                "required": [
-                                    "dataset_name",
-                                    "final_value",
-                                    "best_value",
-                                ],
-                            },
-                        },
-                    },
-                    "required": [
-                        "data",
-                        "metric_name",
-                        "lower_is_better",
-                        "description",
-                    ],
-                },
-                "additionalProperties": False,
-            },
-        },
-        "required": ["valid_metrics_received", "metric_names"],
-        "additionalProperties": False,
-    },
-    description="Parse metrics from execution output",
 )
 
 
@@ -1188,6 +1129,16 @@ class ParallelAgent:
                 f"{runtime.ssh_host}:{runtime.ssh_port} with {runtime.num_gpus} GPU(s); "
                 f"offer={runtime.offer_id}, machine={runtime.machine_id}"
             )
+        elif self.exec_backend == "wsl_ssh":
+            runtime = prepare_wsl_ssh_runtime(self.cfg.exec, self.cfg.exp_name)
+            self.num_gpus = runtime.num_gpus
+            self.num_workers = min(self.num_workers, runtime.recommended_workers)
+            print(
+                "Using WSL SSH backend at "
+                f"{runtime.ssh_user}@{runtime.ssh_host}:{runtime.ssh_port} "
+                f"with {runtime.num_gpus} GPU(s), {runtime.available_memory_gb:.1f} GiB free RAM, "
+                f"{runtime.free_disk_gb:.1f} GiB free disk; workers={self.num_workers}"
+            )
         else:
             self.num_gpus = get_gpu_count()
             print(f"num_gpus: {self.num_gpus}")
@@ -1558,133 +1509,37 @@ class ParallelAgent:
                     "No .npy files found in working directory. Data may not have been saved properly."
                 )
             else:
-                if seed_eval:
-                    # Use the parent node's parse code to parse the same data files again
-                    parse_metrics_code = parent_node.parse_metrics_code
-                    parse_metrics_plan = parent_node.parse_metrics_plan
-                    print(
-                        f"[blue]SEED EVAL: Parse metrics plan:[/blue] {parse_metrics_plan}"
-                    )
-                    print(
-                        f"[blue]SEED EVAL: Parse metrics code:[/blue] {parse_metrics_code}"
-                    )
-                    child_node.parse_metrics_code = parse_metrics_code
-                    child_node.parse_metrics_plan = parse_metrics_plan
-                else:
-                    # Call LLM to parse data files and extract metrics
-                    parse_metrics_prompt = {
-                        "Introduction": (
-                            "You are an AI researcher analyzing experimental results stored in numpy files. "
-                            "Write code to load and analyze the metrics from experiment_data.npy."
-                        ),
-                        "Context": [
-                            "Original Code: " + child_node.code,
-                        ],
-                        "Instructions": [
-                            "0. Make sure to get the working directory from os.path.join(os.getcwd(), 'working')",
-                            "1. Load the experiment_data.npy file, which is located in the working directory",
-                            "2. Extract metrics for each dataset. Make sure to refer to the original code to understand the structure of the data.",
-                            "3. Always print the name of the dataset before printing the metrics",
-                            "4. Always print the name of the metric before printing the value by specifying the metric name clearly. Avoid vague terms like 'train,' 'val,' or 'test.' Instead, use precise labels such as 'train accuracy,' 'validation loss,' or 'test F1 score,' etc.",
-                            "5. You only need to print the best or final value for each metric for each dataset",
-                            "6. DO NOT CREATE ANY PLOTS",
-                            "Important code structure requirements:",
-                            "  - Do NOT put any execution code inside 'if __name__ == \"__main__\":' block. Do not use 'if __name__ == \"__main__\":' at all.",
-                            "  - All code should be at the global scope or in functions that are called from the global scope",
-                            "  - The script should execute immediately when run, without requiring any special entry point",
-                        ],
-                        "Example data loading code": [
-                            """
-                            import matplotlib.pyplot as plt
-                            import numpy as np
-
-                            experiment_data = np.load(os.path.join(os.getcwd(), 'experiment_data.npy'), allow_pickle=True).item()
-                            """
-                        ],
-                        "Response format": worker_agent._prompt_metricparse_resp_fmt(),
-                    }
-
-                    (
-                        parse_metrics_plan,
-                        parse_metrics_code,
-                    ) = worker_agent.plan_and_code_query(parse_metrics_prompt)
-                    print(f"[blue]Parse metrics plan:[/blue] {parse_metrics_plan}")
-                    print(f"[blue]Parse metrics code:[/blue] {parse_metrics_code}")
-                    child_node.parse_metrics_plan = parse_metrics_plan
-                    child_node.parse_metrics_code = parse_metrics_code
+                child_node.parse_metrics_plan = (
+                    "Deterministically extract metrics from working/experiment_data.npy "
+                    "without LLM-generated parsing code."
+                )
+                child_node.parse_metrics_code = (
+                    "deterministic_extractor(experiment_data.npy)"
+                )
                 try:
-                    # Execute the parsing code
-                    metrics_exec_result = process_interpreter.run(
-                        parse_metrics_code, True
+                    metric_names, parse_summary = extract_metrics_payload(
+                        Path(working_dir) / "experiment_data.npy"
                     )
-                    process_interpreter.cleanup_session()
-                    child_node.parse_term_out = metrics_exec_result.term_out
-                    child_node.parse_exc_type = metrics_exec_result.exc_type
-                    child_node.parse_exc_info = metrics_exec_result.exc_info
-                    child_node.parse_exc_stack = metrics_exec_result.exc_stack
-
-                    if metrics_exec_result.exc_type is None:
-                        # Extract metrics from the execution output
-                        metrics_prompt = {
-                            "Introduction": "Parse the metrics from the execution output. You only need the final or best value of a metric for each dataset, not the entire list during training.",
-                            "Execution Output": metrics_exec_result.term_out,
-                        }
-                        print(
-                            f"[blue]Metrics_exec_result.term_out: {metrics_exec_result.term_out}[/blue]"
-                        )
-                        print(
-                            f"[blue]Metrics Parsing Execution Result:\n[/blue] {metrics_exec_result}"
-                        )
-
-                        metrics_response = cast(
-                            dict,
-                            query(
-                                system_message=metrics_prompt,
-                                user_message=None,
-                                func_spec=metric_parse_spec,
-                                model=cfg.agent.feedback.model,
-                                temperature=cfg.agent.feedback.temp,
-                                fallback_model=cfg.agent.feedback.fallback_model,
-                            ),
-                        )
-                        # If there is any None value, child_node.metric should be set to WorstMetricValue.
-                        # This is achieved by raising an error in the MetricValue class,
-                        # which sets child_node.is_buggy to True, thereby
-                        # causing child_node.metric to be assigned WorstMetricValue.
-                        print(f"[blue]Metrics:[/blue] {metrics_response}")
-                        if metrics_response["valid_metrics_received"]:
-                            child_node.metric = MetricValue(
-                                value={"metric_names": metrics_response["metric_names"]}
-                            )
-                            logger.info(
-                                f"Successfully extracted metrics for node {child_node.id}"
-                            )
-                        else:
-                            child_node.metric = WorstMetricValue()
-                            child_node.is_buggy = True
-                            logger.error(
-                                f"No valid metrics received for node {child_node.id}"
-                            )
-                    else:
-                        logger.error(
-                            f"Error executing metrics parsing code: {metrics_exec_result.exc_info}"
-                        )
-                        child_node.metric = WorstMetricValue()
-                        child_node.is_buggy = True
-
+                    child_node.parse_term_out = [parse_summary]
+                    child_node.parse_exc_type = None
+                    child_node.parse_exc_info = None
+                    child_node.parse_exc_stack = None
+                    child_node.metric = MetricValue(value={"metric_names": metric_names})
+                    logger.info(
+                        f"Successfully extracted metrics for node {child_node.id}"
+                    )
                 except Exception as e:
                     logger.error(
                         f"Error parsing metrics for node {child_node.id}: {str(e)}"
                     )
                     child_node.metric = WorstMetricValue()
                     child_node.is_buggy = True
-                    child_node.parse_exc_type = str(e)
-                    child_node.parse_exc_info = None
+                    child_node.parse_exc_type = type(e).__name__
+                    child_node.parse_exc_info = {"args": list(getattr(e, "args", []))}
                     child_node.parse_exc_stack = None
-                    child_node.parse_term_out = (
-                        "Error parsing metrics. There was an error in the parsing code: "
-                        + str(e)
-                    )
+                    child_node.parse_term_out = [
+                        "Deterministic metric extraction failed: " + str(e)
+                    ]
 
             # if experiment was successful, generate and run plotting code
             if not child_node.is_buggy:
@@ -2403,6 +2258,11 @@ class ParallelAgent:
                         cleanup_vast_runtime(self.cfg.exec)
                     except Exception as e:
                         print(f"Error destroying Vast.ai instance: {e}")
+                if self.exec_backend == "wsl_ssh":
+                    try:
+                        cleanup_wsl_ssh_runtime(self.cfg.exec)
+                    except Exception as e:
+                        print(f"Error cleaning WSL SSH runtime: {e}")
                 self._is_shutdown = True
 
     def __exit__(self, exc_type, exc_val, exc_tb):

@@ -8,12 +8,34 @@ from PIL import Image
 from ai_scientist.utils.token_tracker import track_token_usage
 from ai_scientist.openai_chat_completions import create_chat_completion_with_fallback
 from ai_scientist.openai_compatible import (
+    apply_minimax_request_defaults,
     create_openai_client,
     is_openai_reasoning_model,
+    is_minimax_client,
     max_output_token_limit,
+    response_message_to_history_dict,
 )
 
 MAX_NUM_TOKENS = max_output_token_limit()
+
+
+def _preserve_assistant_message(
+    client: Any,
+    message: Any,
+    content: str,
+) -> dict[str, Any]:
+    if is_minimax_client(client):
+        return response_message_to_history_dict(message)
+    return {"role": "assistant", "content": content}
+
+
+def _require_vlm_supported(client: Any) -> None:
+    if not is_minimax_client(client):
+        return
+    raise RuntimeError(
+        "MiniMax compatible OpenAI API does not currently support image/audio inputs. "
+        "Do not use MiniMax for VLM roles such as figure review or image caption checks."
+    )
 
 
 def encode_image_to_base64(image_path: str) -> str:
@@ -57,6 +79,9 @@ def make_llm_call(client, model, temperature, system_message, prompt):
             "stop": None,
         }
 
+    if is_minimax_client(client):
+        request_kwargs = apply_minimax_request_defaults(request_kwargs)
+
     completion, _ = create_chat_completion_with_fallback(
         client,
         messages=messages,
@@ -69,6 +94,7 @@ def make_llm_call(client, model, temperature, system_message, prompt):
 
 @track_token_usage
 def make_vlm_call(client, model, temperature, system_message, prompt):
+    _require_vlm_supported(client)
     messages = [
         {"role": "system", "content": system_message},
         *prompt,
@@ -77,6 +103,8 @@ def make_vlm_call(client, model, temperature, system_message, prompt):
         "temperature": temperature,
         "max_tokens": MAX_NUM_TOKENS,
     }
+    if is_minimax_client(client):
+        request_kwargs = apply_minimax_request_defaults(request_kwargs)
     completion, _ = create_chat_completion_with_fallback(
         client,
         messages=messages,
@@ -139,7 +167,12 @@ def get_response_from_vlm(
     )
 
     content = response.choices[0].message.content
-    new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
+    assistant_message = _preserve_assistant_message(
+        client,
+        response.choices[0].message,
+        content,
+    )
+    new_msg_history = new_msg_history + [assistant_message]
 
     if print_debug:
         print()

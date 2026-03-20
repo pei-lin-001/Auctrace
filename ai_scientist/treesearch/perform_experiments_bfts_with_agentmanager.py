@@ -3,6 +3,7 @@ import logging
 import shutil
 import json
 import pickle
+import traceback
 from . import backend
 from .journal import Journal, Node
 from .journal2report import journal2report
@@ -25,7 +26,7 @@ from .utils.config import load_task_desc, prep_agent_workspace, save_run, load_c
 from .agent_manager import AgentManager
 from pathlib import Path
 from .agent_manager import Stage
-from .log_summarization import overall_summarize
+from .log_summarization import overall_summarize, save_overall_summaries
 from .resume import build_resumed_manager
 
 
@@ -165,8 +166,27 @@ def perform_experiments_bfts(
             # Save the run as before
             save_run(cfg, journal, stage_name=f"stage_{stage.name}")
 
-        except Exception as e:
-            print(f"Error in step callback: {e}")
+            # Gate A: fact_store.json must stay in sync with saved stage artifacts.
+            # If this deterministic extraction fails, stop the run instead of
+            # letting writeup proceed on a broken truth source.
+            from ai_scientist.reliable.runtime_fact_store import (
+                update_fact_store_for_stage,
+            )
+
+            stage_dir = str(cfg.log_dir / f"stage_{stage.name}")
+            fact_store_path = str(cfg.log_dir / "fact_store.json")
+            count = update_fact_store_for_stage(
+                fact_store_path=fact_store_path,
+                stage_name=stage.name,
+                stage_dir=stage_dir,
+                journal=journal,
+            )
+            print(f"[facts] updated fact_store.json ({count} facts)")
+
+        except Exception:
+            print("EXCEPTION in step callback:")
+            print(traceback.format_exc())
+            raise
 
         print(f"Run saved at {cfg.log_dir / f'stage_{stage.name}'}")
         print(f"Step {len(journal)}/{stage.max_iterations} at stage_{stage.name}")
@@ -246,22 +266,19 @@ def perform_experiments_bfts(
             research_summary,
             ablation_summary,
         ) = overall_summarize(manager.journals.items(), cfg)
+        save_overall_summaries(
+            base_folder=str(cfg.log_dir.parent.parent),
+            log_dir=str(cfg.log_dir),
+            draft_summary=draft_summary,
+            baseline_summary=baseline_summary,
+            research_summary=research_summary,
+            ablation_summary=ablation_summary,
+        )
+
         draft_summary_path = cfg.log_dir / "draft_summary.json"
         baseline_summary_path = cfg.log_dir / "baseline_summary.json"
         research_summary_path = cfg.log_dir / "research_summary.json"
         ablation_summary_path = cfg.log_dir / "ablation_summary.json"
-
-        with open(draft_summary_path, "w") as draft_file:
-            json.dump(draft_summary, draft_file, indent=2)
-
-        with open(baseline_summary_path, "w") as baseline_file:
-            json.dump(baseline_summary, baseline_file, indent=2)
-
-        with open(research_summary_path, "w") as research_file:
-            json.dump(research_summary, research_file, indent=2)
-
-        with open(ablation_summary_path, "w") as ablation_file:
-            json.dump(ablation_summary, ablation_file, indent=2)
 
         print(f"Summary reports written to files:")
         print(f"- Draft summary: {draft_summary_path}")

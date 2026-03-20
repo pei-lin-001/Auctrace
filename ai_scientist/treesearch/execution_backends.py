@@ -5,6 +5,7 @@ from typing import Any
 
 from .interpreter import Interpreter
 from .vast_execution import VastRemoteInterpreter
+from .wsl_ssh_execution import WslSshRemoteInterpreter
 
 
 def create_interpreter(
@@ -23,6 +24,13 @@ def create_interpreter(
     if backend == "vast":
         return VastRemoteInterpreter(
             vast_cfg=cfg.exec.vast,
+            run_name=cfg.exp_name,
+            gpu_id=gpu_id,
+            **common_args,
+        )
+    if backend == "wsl_ssh":
+        return WslSshRemoteInterpreter(
+            wsl_ssh_cfg=cfg.exec.wsl_ssh,
             run_name=cfg.exp_name,
             gpu_id=gpu_id,
             **common_args,

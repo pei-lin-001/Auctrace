@@ -8,6 +8,7 @@ pypdf
 pymupdf4llm
 seaborn
 # Common Requirements
+torch
 numpy
 scikit-learn
 transformers

@@ -8,8 +8,11 @@ from .journal import Node, Journal
 
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 sys.path.insert(0, parent_dir)
-from ai_scientist.llm import get_response_from_llm, extract_json_between_markers
-from ai_scientist.treesearch.backend import get_ai_client
+from ai_scientist.llm import (
+    create_client,
+    extract_json_between_markers,
+    get_response_from_llm,
+)
 
 
 report_summarizer_sys_msg = """You are an expert machine learning researcher.
@@ -152,6 +155,8 @@ def get_stage_summary(journal, stage_name, model, client):
     sys_msg, prompt = get_summarizer_prompt(journal, stage_name)
     response = get_response_from_llm(prompt, client, model, sys_msg)
     summary_json = extract_json_between_markers(response[0])
+    if not isinstance(summary_json, dict):
+        raise ValueError("Stage summary LLM did not return a JSON object.")
     return summary_json
 
 
@@ -261,41 +266,32 @@ Ensure the JSON is valid and properly formatted, as it will be automatically par
 """
 
 
+def _normalize_plan_text(plan: Any) -> str:
+    return re.sub(r"\s+", " ", str(plan or "").strip())
+
+
+def _merge_overall_plan(prev_plan: Any, current_plan: Any) -> str:
+    prev_text = _normalize_plan_text(prev_plan)
+    current_text = _normalize_plan_text(current_plan)
+    if not prev_text:
+        return current_text
+    if not current_text:
+        return prev_text
+    if current_text in prev_text:
+        return prev_text
+    if prev_text in current_text:
+        return current_text
+    return f"{prev_text}\n\nCurrent refinement: {current_text}"
+
+
 def annotate_history(journal, cfg=None):
     for node in journal.nodes:
         if node.parent:
-            max_retries = 3
-            retry_count = 0
-            while retry_count < max_retries:
-                try:
-                    if cfg.agent.get("summary", None) is not None:
-                        model = cfg.agent.summary.model
-                    else:
-                        model = "MiniMax-M2.5"
-                    client = get_ai_client(model)
-                    response = get_response_from_llm(
-                        overall_plan_summarizer_prompt.format(
-                            prev_overall_plan=node.parent.overall_plan,
-                            current_plan=node.plan,
-                        ),
-                        client,
-                        model,
-                        report_summarizer_sys_msg,
-                    )
-                    node.overall_plan = extract_json_between_markers(response[0])[
-                        "overall_plan"
-                    ]
-                    break
-                except Exception as e:
-                    retry_count += 1
-                    if retry_count == max_retries:
-                        print(f"Failed after {max_retries} attempts. Error: {e}")
-                        raise
-                    print(
-                        f"Error occurred: {e}. Retrying... ({max_retries - retry_count} attempts left)"
-                    )
+            # This plan history is only structural context for later stage summaries.
+            # Keep it deterministic instead of depending on fragile JSON-formatted LLM output.
+            node.overall_plan = _merge_overall_plan(node.parent.overall_plan, node.plan)
         else:
-            node.overall_plan = node.plan
+            node.overall_plan = _normalize_plan_text(node.plan)
 
 
 def _parse_stage_number(stage_name: str) -> int:
@@ -342,27 +338,37 @@ def _summarize_ablation(stage_name: str, journal: Journal) -> list[dict[str, Any
 
 
 def _summarize_draft(stage_name: str, journal: Journal, cfg: Any) -> dict[str, Any]:
-    model = (
+    requested_model = (
         cfg.agent.summary.get("model", "")
         if cfg is not None and cfg.agent.get("summary", None) is not None
         else "MiniMax-M2.5"
     )
-    client = get_ai_client(model)
+    client, model = create_client(requested_model)
     return get_stage_summary(journal, stage_name, model, client)
 
 
 def _process_summary_task(task: tuple[str, str, Journal], cfg: Any) -> tuple[str, Any]:
     kind, stage_name, journal = task
     annotate_history(journal, cfg=cfg)
-    if kind == "draft":
-        return kind, _summarize_draft(stage_name, journal, cfg)
-    if kind in {"baseline", "research"}:
-        payload = _summarize_best_node(stage_name, journal, cfg)
-        payload["stage_name"] = stage_name
-        return kind, payload
-    if kind == "ablation":
-        return kind, _summarize_ablation(stage_name, journal)
-    raise ValueError(f"Unknown summary task kind: {kind!r}")
+    try:
+        if kind == "draft":
+            return kind, _summarize_draft(stage_name, journal, cfg)
+        if kind in {"baseline", "research"}:
+            payload = _summarize_best_node(stage_name, journal, cfg)
+            payload["stage_name"] = stage_name
+            return kind, payload
+        if kind == "ablation":
+            return kind, _summarize_ablation(stage_name, journal)
+        raise ValueError(f"Unknown summary task kind: {kind!r}")
+    except Exception as exc:
+        print(f"[summary] failed kind={kind} stage={stage_name}: {type(exc).__name__}: {exc}")
+        if kind == "ablation":
+            return kind, []
+        return kind, {
+            "stage_name": stage_name,
+            "error": str(exc),
+            "exception_type": type(exc).__name__,
+        }
 
 
 def overall_summarize(journals, cfg=None):
@@ -408,6 +414,38 @@ def overall_summarize(journals, cfg=None):
             ablation_summary.extend(payload)
 
     return draft_summary, baseline_summary, research_summary, ablation_summary
+
+
+def save_overall_summaries(
+    *,
+    base_folder: str,
+    log_dir: str,
+    draft_summary: dict[str, Any],
+    baseline_summary: dict[str, Any],
+    research_summary: dict[str, Any],
+    ablation_summary: list[dict[str, Any]],
+) -> None:
+    from ai_scientist.reliable.writeup_summary import export_writeup_summary_symbolic
+
+    raw_targets = {
+        "draft_summary.json": draft_summary,
+        "baseline_summary.json": baseline_summary,
+        "research_summary.json": research_summary,
+        "ablation_summary.json": ablation_summary,
+    }
+    for filename, payload in raw_targets.items():
+        path = os.path.join(log_dir, filename)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+
+    export_writeup_summary_symbolic(
+        base_folder=base_folder,
+        log_dir=log_dir,
+        draft_summary=draft_summary,
+        baseline_summary=baseline_summary,
+        research_summary=research_summary,
+        ablation_summary=ablation_summary,
+    )
 
 
 if __name__ == "__main__":
@@ -477,22 +515,19 @@ if __name__ == "__main__":
         ablation_summary,
     ) = overall_summarize(journals)
     log_dir = "logs/247-run"
+    save_overall_summaries(
+        base_folder=os.path.dirname(os.path.dirname(log_dir)),
+        log_dir=log_dir,
+        draft_summary=draft_summary,
+        baseline_summary=baseline_summary,
+        research_summary=research_summary,
+        ablation_summary=ablation_summary,
+    )
+
     draft_summary_path = log_dir + "/draft_summary.json"
     baseline_summary_path = log_dir + "/baseline_summary.json"
     research_summary_path = log_dir + "/research_summary.json"
     ablation_summary_path = log_dir + "/ablation_summary.json"
-
-    with open(draft_summary_path, "w") as draft_file:
-        json.dump(draft_summary, draft_file, indent=2)
-
-    with open(baseline_summary_path, "w") as baseline_file:
-        json.dump(baseline_summary, baseline_file, indent=2)
-
-    with open(research_summary_path, "w") as research_file:
-        json.dump(research_summary, research_file, indent=2)
-
-    with open(ablation_summary_path, "w") as ablation_file:
-        json.dump(ablation_summary, ablation_file, indent=2)
 
     print(f"Summary reports written to files:")
     print(f"- Draft summary: {draft_summary_path}")

@@ -4,6 +4,8 @@
 \usepackage{microtype}
 \usepackage{graphicx}
 \usepackage{subfigure}
+\providecommand{\subfloat}[2][]{\subfigure[#1]{#2}} % subfig compat
+\providecommand{\subcaptionbox}[2]{\subfigure[#1]{#2}} % subcaption compat
 \usepackage{booktabs} % for professional tables
 \usepackage{hyperref}
 % Attempt to make hyperref and algorithmic work together better:

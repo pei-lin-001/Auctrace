@@ -4,12 +4,16 @@ import logging
 import time
 from typing import Any, Iterable
 
+import httpx
 import openai
+
+from .openai_compatible import is_minimax_client
 
 logger = logging.getLogger("ai-scientist")
 
 DEFAULT_CONNECTION_RETRIES = 4
 CONNECTION_BACKOFF_BASE_SECONDS = 2.0
+INTERNAL_FORCE_NON_STREAM_FLAG = "_ai_scientist_force_non_stream"
 
 RETRYABLE_MODEL_EXCEPTIONS = (
     openai.RateLimitError,
@@ -17,6 +21,12 @@ RETRYABLE_MODEL_EXCEPTIONS = (
     openai.APITimeoutError,
     openai.InternalServerError,
     openai.APIError,
+)
+RETRYABLE_CONNECTION_EXCEPTIONS = (
+    openai.APIConnectionError,
+    openai.APITimeoutError,
+    openai.APIError,
+    httpx.TransportError,
 )
 
 
@@ -35,6 +45,14 @@ def _require_messages(messages: list[dict[str, Any]]) -> None:
     if messages:
         return
     raise ValueError("chat.completions messages must not be empty")
+def _prepare_request_kwargs(
+    request_kwargs: dict[str, Any],
+) -> tuple[dict[str, Any], bool]:
+    effective_kwargs = dict(request_kwargs)
+    force_non_stream = bool(
+        effective_kwargs.pop(INTERNAL_FORCE_NON_STREAM_FLAG, False)
+    )
+    return effective_kwargs, force_non_stream
 
 
 def create_chat_completion_with_fallback(
@@ -88,13 +106,13 @@ def _create_with_connection_retries(
     retries = max(1, connection_retries)
     for attempt in range(retries):
         try:
-            return _create_streamed_chat_completion(
+            return _create_chat_completion(
                 client,
                 messages=messages,
                 model=model,
                 request_kwargs=request_kwargs,
             )
-        except (openai.APIConnectionError, openai.APITimeoutError, openai.APIError) as exc:
+        except RETRYABLE_CONNECTION_EXCEPTIONS as exc:
             if attempt + 1 >= retries:
                 raise
             wait_seconds = _connection_backoff_seconds(attempt)
@@ -113,6 +131,59 @@ def _create_with_connection_retries(
                 cause_text,
             )
             time.sleep(wait_seconds)
+
+
+def _create_chat_completion(
+    client: openai.OpenAI,
+    *,
+    messages: list[dict[str, Any]],
+    model: str,
+    request_kwargs: dict[str, Any],
+) -> openai.types.chat.ChatCompletion:
+    effective_kwargs, force_non_stream = _prepare_request_kwargs(request_kwargs)
+    if _should_use_non_stream_chat_completion(
+        client,
+        effective_kwargs,
+        force_non_stream,
+    ):
+        return _create_non_stream_chat_completion(
+            client,
+            messages=messages,
+            model=model,
+            request_kwargs=effective_kwargs,
+        )
+    return _create_streamed_chat_completion(
+        client,
+        messages=messages,
+        model=model,
+        request_kwargs=effective_kwargs,
+    )
+
+
+def _should_use_non_stream_chat_completion(
+    client: openai.OpenAI,
+    request_kwargs: dict[str, Any],
+    force_non_stream: bool,
+) -> bool:
+    if force_non_stream or request_kwargs.get("tools"):
+        return True
+    if is_minimax_client(client):
+        return True
+    return False
+
+
+def _create_non_stream_chat_completion(
+    client: openai.OpenAI,
+    *,
+    messages: list[dict[str, Any]],
+    model: str,
+    request_kwargs: dict[str, Any],
+) -> openai.types.chat.ChatCompletion:
+    return client.chat.completions.create(
+        model=model,
+        messages=messages,
+        **request_kwargs,
+    )
 
 
 def _create_streamed_chat_completion(

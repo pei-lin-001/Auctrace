@@ -22,8 +22,48 @@ from ai_scientist.vlm import create_client as create_vlm_client
 from ai_scientist.latex_sanitize import (
     ensure_tex_has_end_document,
     ensure_tex_uses_references_bibliography,
+    sanitize_bibtex_text_for_pdflatex,
     sanitize_tex_file_for_pdflatex,
 )
+
+from ai_scientist.reliable.facts import facts_index_for_prompt
+from ai_scientist.reliable.latex_compile import compile_symbolic_latex_project
+from ai_scientist.reliable.writeup_inputs import ensure_symbolic_writeup_inputs
+from ai_scientist.reliable.writeup_validation import validate_generated_writeup
+from ai_scientist.reliable.artifact_manifest import (
+    artifact_manifest_summary,
+    ensure_artifact_manifest,
+)
+from ai_scientist.reliable.context_packs import (
+    build_claim_context_pack,
+    build_writeup_context_pack,
+    save_context_pack,
+)
+from ai_scientist.reliable.remediation import (
+    build_remediation_prompt_block,
+    classify_remediation_failure,
+    print_remediation_report,
+    save_remediation_report,
+)
+from ai_scientist.reliable.errors import SymbolicLatexError
+from ai_scientist.reliable.claim_ledger import (
+    generate_claim_ledger,
+    save_claim_ledger,
+    validate_claim_ledger,
+)
+from ai_scientist.reliable.claim_traceability import (
+    build_claim_trace_index,
+    save_claim_trace_index,
+    validate_used_fact_traceability,
+)
+from ai_scientist.reliable.outsider_audit import (
+    build_outsider_audit_context_pack,
+    build_outsider_audit_inputs,
+    generate_outsider_audit,
+    save_outsider_audit,
+    validate_outsider_audit,
+)
+from ai_scientist.env_utils import env_bool, env_str
 
 
 def remove_accents_and_clean(s):
@@ -456,34 +496,18 @@ writeup_prompt = """Your goal is to write up the following idea:
 {idea_text}
 ```
 
-We have the following experiment summaries (JSON):
+We have the following canonical writeup context pack (JSON):
 ```json
-{summaries}
+{writeup_context_pack}
 ```
 
-We also have a script used to produce the final plots (use this to see how the plots are generated and what names are used in the legend):
-```python
-{aggregator_code}
-```
-Please also consider which plots should naturally be grouped together as subfigures.
+{facts_instructions}
+{remediation_instructions}
 
-Available plots for the writeup (use these filenames):
-```
-{plot_list}
-```
-
-We also have VLM-based figure descriptions:
-```
-{plot_descriptions}
-```
-
-Your current progress on the LaTeX write-up is:
-```latex
-{latex_writeup}
-```
+{plot_generation_notes}
 
 Produce the final version of the LaTeX manuscript now, ensuring the paper is coherent, concise, and reports results accurately.
-Return the entire file in full, with no unfilled placeholders!
+Return the entire file in full.
 This must be an acceptable complete LaTeX writeup.
 
 Please provide the updated LaTeX code for 'template.tex', wrapped in triple backticks
@@ -503,6 +527,8 @@ def perform_writeup(
     big_model="deepseek-chat",
     n_writeup_reflections=3,
     page_limit=8,
+    symbolic_facts: bool = False,
+    remediation_context: dict[str, object] | None = None,
 ):
     compile_attempt = 0
     base_pdf_file = osp.join(base_folder, f"{osp.basename(base_folder)}")
@@ -527,29 +553,64 @@ def perform_writeup(
                 with open(idea_md_path, "r") as f_idea:
                     idea_text = f_idea.read()
 
-        # Load summaries
-        summary_files = [
-            ("logs/0-run/baseline_summary.json", "BASELINE_SUMMARY"),
-            ("logs/0-run/research_summary.json", "RESEARCH_SUMMARY"),
-            ("logs/0-run/ablation_summary.json", "ABLATION_SUMMARY"),
-        ]
-        loaded_summaries = {}
-        for fname, key in summary_files:
-            path = osp.join(base_folder, fname)
-            if osp.exists(path):
-                try:
-                    with open(path, "r") as f:
-                        loaded_summaries[key] = json.load(f)
-                except json.JSONDecodeError:
-                    print(
-                        f"Warning: {fname} is not valid JSON. Using empty data for {key}."
-                    )
-                    loaded_summaries[key] = {}
-            else:
-                loaded_summaries[key] = {}
+        facts_instructions = ""
+        facts_index = ""
+        summaries_for_prompt = {}
+        remediation_instructions = build_remediation_prompt_block(remediation_context)
+        fact_store_path = osp.join(base_folder, "logs", "0-run", "fact_store.json")
+        if symbolic_facts:
+            store, writeup_summary_symbolic = ensure_symbolic_writeup_inputs(base_folder)
+            if not store.facts:
+                raise RuntimeError(
+                    "Symbolic-facts writeup requested but FactStore is empty. "
+                    "Ensure baseline_summary.json and research_summary.json exist under logs/0-run."
+                )
 
-        # Convert them to one big JSON string for context
-        combined_summaries_str = json.dumps(loaded_summaries, indent=2)
+            facts_index = facts_index_for_prompt(store)
+            facts_instructions = (
+                "FACT VARIABLES MODE (symbolic writeup):\n"
+                "- Do NOT write any experimental numeric results directly (no 0.123, 12.3%, etc.).\n"
+                "- Whenever you need a number from experiments, insert \\\\fact{KEY} using a KEY from the index.\n"
+                "- Keep \\\\fact{...} placeholders in the LaTeX; a renderer will fill values before compilation.\n"
+                "- Use only exact keys listed in writeup_context_pack.facts_index.\n"
+                "- Never invent, rename, or change stage/dataset suffixes in a fact key.\n"
+                "- If no exact fact key exists for a sentence, rewrite that sentence qualitatively instead of fabricating a placeholder.\n"
+                "- The manuscript must still contain at least one valid \\\\fact{KEY} placeholder.\n"
+                "- Do NOT write approximate relative reductions or raw percentage ranges such as 'over 30\\\\%' or '15-25\\\\%'; anchor them to facts or rewrite qualitatively.\n"
+                "- When including figures, use only exact strings from writeup_context_pack.artifact_manifest_summary.includegraphics_targets.\n"
+                "- Do NOT reference stale experiment_results/*.png paths from older drafts or prior runs.\n"
+            )
+            summaries_for_prompt = {
+                "WRITEUP_SYMBOLIC_SUMMARY": writeup_summary_symbolic,
+            }
+        else:
+            # Load summaries for non-symbolic prompting only.
+            summary_files = [
+                ("logs/0-run/draft_summary.json", "DRAFT_SUMMARY"),
+                ("logs/0-run/baseline_summary.json", "BASELINE_SUMMARY"),
+                ("logs/0-run/research_summary.json", "RESEARCH_SUMMARY"),
+                ("logs/0-run/ablation_summary.json", "ABLATION_SUMMARY"),
+            ]
+            loaded_summaries = {}
+            for fname, key in summary_files:
+                path = osp.join(base_folder, fname)
+                if osp.exists(path):
+                    try:
+                        with open(path, "r") as f:
+                            loaded_summaries[key] = json.load(f)
+                    except json.JSONDecodeError:
+                        print(
+                            f"Warning: {fname} is not valid JSON. Using empty data for {key}."
+                        )
+                        loaded_summaries[key] = {}
+                else:
+                    loaded_summaries[key] = {}
+            facts_instructions = (
+                "NON-SYMBOLIC MODE:\n"
+                "- Do NOT use any \\\\fact{...} placeholders.\n"
+                "- Write numeric experimental results directly in the LaTeX.\n"
+            )
+            summaries_for_prompt = loaded_summaries
 
         # Prepare a new fresh latex folder
         if not osp.exists(osp.join(latex_folder, "template.tex")):
@@ -569,17 +630,26 @@ def perform_writeup(
                 if fplot.lower().endswith(".png"):
                     plot_names.append(fplot)
 
-        # Load aggregator script to include in the prompt
-        aggregator_path = osp.join(base_folder, "auto_plot_aggregator.py")
-        aggregator_code = ""
-        if osp.exists(aggregator_path):
-            with open(aggregator_path, "r") as fa:
-                aggregator_code = fa.read()
-        else:
-            aggregator_code = "No aggregator script found."
+        manifest = None
+        manifest_summary_str = "{}"
+        if symbolic_facts:
+            manifest = ensure_artifact_manifest(base_folder=base_folder, store=store)
+            manifest_summary_str = json.dumps(
+                artifact_manifest_summary(manifest),
+                indent=2,
+            )
 
         if no_writing:
-            compile_latex(latex_folder, base_pdf_file + ".pdf")
+            if symbolic_facts:
+                compile_symbolic_latex_project(
+                    latex_folder=latex_folder,
+                    pdf_file=base_pdf_file + ".pdf",
+                    fact_store_path=fact_store_path,
+                    rendered_tex_artifact_path=osp.join(latex_folder, "template.rendered.tex"),
+                    used_facts_artifact_path=osp.join(latex_folder, "used_facts.json"),
+                )
+            else:
+                compile_latex(latex_folder, base_pdf_file + ".pdf")
             return osp.exists(base_pdf_file + ".pdf")
 
         # Run small model for citation additions
@@ -610,6 +680,7 @@ def perform_writeup(
                     break
 
                 if addition is not None:
+                    addition, _ = sanitize_bibtex_text_for_pdflatex(addition)
                     # Simple check to avoid duplicating the same title
                     title_match = re.search(r" title = {(.*?)}", addition)
                     if title_match:
@@ -630,36 +701,44 @@ def perform_writeup(
                 print(traceback.format_exc())
                 continue
 
-        # Generate VLM-based descriptions but do not overwrite plot_names
-        try:
-            vlm_client, vlm_model = create_vlm_client(small_model)
-            desc_map = {}
-            for pf in plot_names:
-                ppath = osp.join(figures_dir, pf)
-                if not osp.exists(ppath):
-                    continue
-                img_dict = {
-                    "images": [ppath],
-                    "caption": "No direct caption",
-                }
-                review_data = generate_vlm_img_review(img_dict, vlm_model, vlm_client)
-                if review_data:
-                    desc_map[pf] = review_data.get(
-                        "Img_description", "No description found"
-                    )
-                else:
-                    desc_map[pf] = "No description found"
+        desc_map = {}
+        plot_generation_notes = ""
+        if not symbolic_facts:
+            aggregator_path = osp.join(base_folder, "auto_plot_aggregator.py")
+            aggregator_code = "No aggregator script found."
+            if osp.exists(aggregator_path):
+                with open(aggregator_path, "r") as fa:
+                    aggregator_code = fa.read()
+            try:
+                vlm_client, vlm_model = create_vlm_client(small_model)
+                for pf in plot_names:
+                    ppath = osp.join(figures_dir, pf)
+                    if not osp.exists(ppath):
+                        continue
+                    img_dict = {
+                        "images": [ppath],
+                        "caption": "No direct caption",
+                    }
+                    review_data = generate_vlm_img_review(img_dict, vlm_model, vlm_client)
+                    if review_data:
+                        desc_map[pf] = review_data.get(
+                            "Img_description", "No description found"
+                        )
+                    else:
+                        desc_map[pf] = "No description found"
 
-            # Prepare a string listing all figure descriptions in order
-            plot_descriptions_list = []
-            for fname in plot_names:
-                desc_text = desc_map.get(fname, "No description found")
-                plot_descriptions_list.append(f"{fname}: {desc_text}")
-            plot_descriptions_str = "\n".join(plot_descriptions_list)
-        except Exception:
-            print("EXCEPTION in VLM figure description generation:")
-            print(traceback.format_exc())
-            plot_descriptions_str = "No descriptions available."
+            except Exception:
+                print("EXCEPTION in VLM figure description generation:")
+                print(traceback.format_exc())
+                desc_map = {}
+            plot_generation_notes = (
+                "We also have a script used to produce the final plots "
+                "(use this to see how the plots are generated and what names are used in the legend):\n"
+                "```python\n"
+                f"{aggregator_code}\n"
+                "```\n"
+                "Please also consider which plots should naturally be grouped together as subfigures."
+            )
 
         # Construct final prompt for big model, placing the figure descriptions alongside the plot list
         big_model_system_message = writeup_system_message_template.format(
@@ -668,14 +747,26 @@ def perform_writeup(
         big_client, big_client_model = create_client(big_model)
         with open(writeup_file, "r") as f:
             writeup_text = f.read()
+        writeup_context_pack = build_writeup_context_pack(
+            symbolic_facts=symbolic_facts,
+            summaries_for_prompt=summaries_for_prompt,
+            facts_index=facts_index,
+            artifact_manifest_summary=json.loads(manifest_summary_str),
+            current_latex=writeup_text,
+            plot_names=plot_names,
+            plot_descriptions=desc_map,
+        )
+        save_context_pack(
+            osp.join(latex_folder, "writeup_context_pack.json"),
+            writeup_context_pack,
+        )
 
         combined_prompt = writeup_prompt.format(
             idea_text=idea_text,
-            summaries=combined_summaries_str,
-            aggregator_code=aggregator_code,
-            plot_list=", ".join(plot_names),
-            latex_writeup=writeup_text,
-            plot_descriptions=plot_descriptions_str,
+            writeup_context_pack=json.dumps(writeup_context_pack, indent=2),
+            facts_instructions=facts_instructions,
+            remediation_instructions=remediation_instructions,
+            plot_generation_notes=plot_generation_notes,
         )
 
         response, msg_history = get_response_from_llm(
@@ -688,10 +779,18 @@ def perform_writeup(
 
         latex_code_match = re.search(r"```latex(.*?)```", response, re.DOTALL)
         if not latex_code_match:
-            return False
+            raise SymbolicLatexError(
+                "LLM response did not contain a complete ```latex``` block."
+            )
         updated_latex_code = latex_code_match.group(1).strip()
         with open(writeup_file, "w") as f:
             f.write(updated_latex_code)
+        validate_generated_writeup(
+            updated_latex_code,
+            symbolic_facts=symbolic_facts,
+            store=store if symbolic_facts else None,
+            artifact_manifest=manifest,
+        )
 
         # Multiple reflection loops on the final LaTeX
         for i in range(n_writeup_reflections):
@@ -708,7 +807,17 @@ def perform_writeup(
             invalid_figs = used_figs - all_figs
 
             # Compile current version before reflection
-            compile_latex(latex_folder, base_pdf_file + f"_{compile_attempt}.pdf")
+            compile_pdf = base_pdf_file + f"_{compile_attempt}.pdf"
+            if symbolic_facts:
+                compile_symbolic_latex_project(
+                    latex_folder=latex_folder,
+                    pdf_file=compile_pdf,
+                    fact_store_path=fact_store_path,
+                    rendered_tex_artifact_path=osp.join(latex_folder, "template.rendered.tex"),
+                    used_facts_artifact_path=osp.join(latex_folder, "used_facts.json"),
+                )
+            else:
+                compile_latex(latex_folder, compile_pdf)
             compile_attempt += 1
             print(f"Compiled {base_pdf_file}_{compile_attempt}.pdf")
 
@@ -728,6 +837,24 @@ def perform_writeup(
                 f"chktex {writeup_file} -q -n2 -n24 -n13 -n1"
             ).read()
 
+            fact_mode_rules = ""
+            if symbolic_facts:
+                fact_mode_rules = (
+                    "\nFACT VARIABLES MODE REMINDER:\n"
+                    "- Keep all \\\\fact{...} placeholders (do not replace them with numbers).\n"
+                    "- Do not write any new numeric experimental results unless via \\\\fact{KEY}.\n"
+                    "- Use only exact keys from the fact index; never invent or rename a key.\n"
+                    "- If a needed exact key is missing, rewrite the sentence qualitatively.\n"
+                    "- Keep at least one valid \\\\fact{KEY} placeholder in the manuscript.\n"
+                    "- Do not write approximate relative reductions or raw percentage ranges such as 'over 30\\\\%' or '15-25\\\\%'.\n"
+                    "- Keep figure references aligned with artifact_manifest_summary.includegraphics_targets; remove stale experiment_results/*.png paths.\n"
+                )
+            else:
+                fact_mode_rules = (
+                    "\nNON-SYMBOLIC MODE REMINDER:\n"
+                    "- Do NOT use any \\\\fact{...} placeholders. Output numeric results directly.\n"
+                )
+
             reflection_prompt = f"""
 Now let's reflect and identify any issues (including but not limited to):
 1) Are there any LaTeX syntax errors or style violations we can fix? Refer to the chktex output below.
@@ -741,10 +868,12 @@ chktex results:
 {check_output}
 ```
 
-Please provide a revised complete LaTeX in triple backticks, or repeat the same if no changes are needed.
-Return the entire file in full, with no unfilled placeholders!
-This must be an acceptable complete LaTeX writeup.
-Do not hallucinate any details!
+            {fact_mode_rules}
+            {remediation_instructions}
+
+            Please provide a revised complete LaTeX in triple backticks, or repeat the same if no changes are needed.
+            Return the entire file in full. This must be an acceptable complete LaTeX writeup.
+            Do not hallucinate any details!
 
 If you believe you are done, simply say: "I am done".
 """
@@ -782,10 +911,26 @@ If you believe you are done, simply say: "I am done".
 
                     with open(writeup_file, "w") as fo:
                         fo.write(final_text)
-
-                    compile_latex(
-                        latex_folder, base_pdf_file + f"_{compile_attempt}.pdf"
+                    validate_generated_writeup(
+                        final_text,
+                        symbolic_facts=symbolic_facts,
+                        store=store if symbolic_facts else None,
+                        artifact_manifest=manifest,
                     )
+
+                    compile_pdf = base_pdf_file + f"_{compile_attempt}.pdf"
+                    if symbolic_facts:
+                        compile_symbolic_latex_project(
+                            latex_folder=latex_folder,
+                            pdf_file=compile_pdf,
+                            fact_store_path=fact_store_path,
+                            rendered_tex_artifact_path=osp.join(
+                                latex_folder, "template.rendered.tex"
+                            ),
+                            used_facts_artifact_path=osp.join(latex_folder, "used_facts.json"),
+                        )
+                    else:
+                        compile_latex(latex_folder, compile_pdf)
                     compile_attempt += 1
                     print(f"Compiled {base_pdf_file}_{compile_attempt}.pdf")
                 else:
@@ -795,11 +940,104 @@ If you believe you are done, simply say: "I am done".
                 print(f"No valid LaTeX code block found in reflection step {i+1}.")
                 break
 
-        return osp.exists(base_pdf_file + f"_{compile_attempt-1}.pdf")
+        final_pdf = base_pdf_file + f"_{compile_attempt-1}.pdf"
+        if symbolic_facts:
+            used_facts_path = osp.join(latex_folder, "used_facts.json")
+            if not osp.exists(used_facts_path):
+                raise RuntimeError(
+                    "Symbolic-facts writeup expected used_facts.json but it was not generated."
+                )
+            with open(used_facts_path, "r", encoding="utf-8") as f:
+                used_facts = json.load(f)
+            with open(writeup_file, "r", encoding="utf-8") as f:
+                symbolic_tex = f.read()
+            manifest = ensure_artifact_manifest(
+                base_folder=base_folder,
+                store=store,
+                tex_path=writeup_file,
+            )
+            claim_context_pack = build_claim_context_pack(
+                symbolic_tex=symbolic_tex,
+                used_facts=used_facts,
+                artifact_manifest_summary=artifact_manifest_summary(manifest),
+            )
+            save_context_pack(
+                osp.join(latex_folder, "claim_context_pack.json"),
+                claim_context_pack,
+            )
 
-    except Exception:
+            ledger = generate_claim_ledger(
+                symbolic_tex=symbolic_tex,
+                used_facts=used_facts,
+                client=big_client,
+                model=big_client_model,
+                artifact_manifest_summary=artifact_manifest_summary(manifest),
+                context_pack=claim_context_pack,
+                remediation_instructions=remediation_instructions,
+            )
+            used_keys = used_facts.get("used_keys")
+            used_keys = used_keys if isinstance(used_keys, list) else []
+            validate_claim_ledger(
+                ledger,
+                store=store,
+                used_keys=used_keys,
+                artifact_manifest=manifest,
+            )
+            claim_ledger_path = osp.join(latex_folder, "claim_ledger.json")
+            save_claim_ledger(claim_ledger_path, ledger)
+            print(f"[claims] wrote claim ledger: {claim_ledger_path}")
+            claim_trace_index = build_claim_trace_index(
+                ledger=ledger,
+                symbolic_tex=symbolic_tex,
+            )
+            validate_used_fact_traceability(
+                claim_trace_index,
+                used_keys=used_keys,
+            )
+            claim_trace_path = osp.join(latex_folder, "claim_trace_index.json")
+            save_claim_trace_index(claim_trace_path, claim_trace_index)
+            print(f"[claims] wrote claim trace index: {claim_trace_path}")
+
+            if env_bool("AI_SCIENTIST_OUTSIDER_AUDIT", True):
+                audit_model_name = env_str("AI_SCIENTIST_MODEL_OUTSIDER_AUDIT", small_model)
+                audit_client, audit_model = create_client(audit_model_name)
+                audit_inputs = build_outsider_audit_inputs(
+                    symbolic_tex=symbolic_tex,
+                    used_facts=used_facts,
+                    store=store,
+                    claim_ledger=ledger,
+                    artifact_manifest_summary=artifact_manifest_summary(manifest),
+                )
+                save_context_pack(
+                    osp.join(latex_folder, "audit_context_pack.json"),
+                    build_outsider_audit_context_pack(audit_inputs),
+                )
+                audit = generate_outsider_audit(
+                    inputs=audit_inputs,
+                    client=audit_client,
+                    model=audit_model,
+                )
+                validate_outsider_audit(audit)
+                audit_path = osp.join(latex_folder, "outsider_audit.json")
+                save_outsider_audit(audit_path, audit)
+                print(f"[audit] wrote outsider audit: {audit_path}")
+
+        return osp.exists(final_pdf)
+
+    except Exception as exc:
+        trace_text = traceback.format_exc()
+        report = classify_remediation_failure(
+            phase="perform_writeup",
+            exc=exc,
+            traceback_text=trace_text,
+        )
+        save_remediation_report(
+            osp.join(latex_folder, "remediation_failure.json"),
+            report,
+        )
         print("EXCEPTION in perform_writeup:")
-        print(traceback.format_exc())
+        print(trace_text)
+        print_remediation_report(report)
         return False
 
 

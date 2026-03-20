@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable
@@ -115,3 +116,45 @@ def ensure_tex_uses_references_bibliography(tex_path: str | Path) -> bool:
     text = text.replace(needle, "\\bibliography{references}")
     path.write_text(text, encoding="utf-8")
     return True
+
+
+_BIBTEX_ESCAPE_RE = re.compile(r"(?<!\\)([_&])")
+_BIBTEX_DOUBLE_ESCAPE_RE = re.compile(r"\\\\([_&])")
+_BIBTEX_ESCAPE_MAP = {
+    "_": r"\_",
+    "&": r"\&",
+}
+
+
+def sanitize_bibtex_text_for_pdflatex(bibtex_text: str) -> tuple[str, Dict[str, int]]:
+    """Escape a small set of LaTeX-special characters inside BibTeX entries.
+
+    Semantic Scholar (and similar sources) sometimes return BibTeX with raw
+    underscores like `RNN_Bert_Based` in titles. BibTeX will forward those
+    tokens into the generated `.bbl`, which makes pdflatex fail with
+    `Missing $ inserted` / `Extra }`.
+
+    This sanitizer is intentionally narrow:
+    - Escapes `_` and `&` when they are not already escaped.
+    - Skips the entry header line that contains the citation key (starts with `@`)
+      so citation keys remain stable for `\\cite{...}`.
+    """
+
+    counts: Dict[str, int] = {}
+    out_lines: list[str] = []
+    for raw_line in bibtex_text.splitlines(keepends=True):
+        if raw_line.lstrip().startswith("@"):
+            out_lines.append(raw_line)
+            continue
+
+        # Normalize legacy over-escaping like `\\_` -> `\_` inside bib fields.
+        normalized_line = _BIBTEX_DOUBLE_ESCAPE_RE.sub(r"\\\1", raw_line)
+
+        def _repl(match: re.Match[str]) -> str:
+            ch = match.group(1)
+            counts[ch] = counts.get(ch, 0) + 1
+            return _BIBTEX_ESCAPE_MAP[ch]
+
+        out_lines.append(_BIBTEX_ESCAPE_RE.sub(_repl, normalized_line))
+
+    return "".join(out_lines), counts

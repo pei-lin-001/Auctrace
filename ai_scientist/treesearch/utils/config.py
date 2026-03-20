@@ -1,6 +1,7 @@
 """configuration and setup utils"""
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any, Hashable, cast, Literal, Optional
 
@@ -81,6 +82,7 @@ class ExecConfig:
     agent_file_name: str
     format_tb_ipython: bool
     vast: Optional[dict[str, Any]] = None
+    wsl_ssh: Optional[dict[str, Any]] = None
 
 
 @dataclass
@@ -268,16 +270,15 @@ def save_run(cfg: Config, journal, stage_name: str = None):
             # save best_node.id to a text file
             with open(save_dir / "best_node_id.txt", "w") as f:
                 f.write(str(best_node.id))
-            serialize.dump_json(
-                {
-                    "node_id": str(best_node.id),
-                    "filename": filename,
-                    "only_good_used": only_good_used,
-                    "is_buggy": is_buggy,
-                    "is_buggy_plots": bool(getattr(best_node, "is_buggy_plots", False)),
-                },
-                save_dir / "best_node.json",
-            )
+            best_node_payload = {
+                "node_id": str(best_node.id),
+                "filename": filename,
+                "only_good_used": only_good_used,
+                "is_buggy": is_buggy,
+                "is_buggy_plots": bool(getattr(best_node, "is_buggy_plots", False)),
+            }
+            with open(save_dir / "best_node.json", "w") as f:
+                json.dump(best_node_payload, f, separators=(",", ":"))
         else:
             print("No best node found yet")
     except Exception as e:

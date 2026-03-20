@@ -9,6 +9,7 @@ import traceback
 import unicodedata
 import uuid
 import tempfile
+from typing import Any
 
 from ai_scientist.llm import (
     get_response_from_llm,
@@ -30,8 +31,66 @@ from ai_scientist.vlm import create_client as create_vlm_client
 from ai_scientist.latex_sanitize import (
     ensure_tex_has_end_document,
     ensure_tex_uses_references_bibliography,
+    sanitize_bibtex_text_for_pdflatex,
     sanitize_tex_file_for_pdflatex,
 )
+
+from ai_scientist.reliable.facts import facts_index_for_prompt
+from ai_scientist.reliable.latex_compile import compile_symbolic_latex_project
+from ai_scientist.reliable.latex_scaffold import editable_suffix, normalize_generated_latex_draft
+from ai_scientist.reliable.latex_fixup import fixup_latex_before_validation
+from ai_scientist.reliable.latex_patch import apply_latex_patch_ops
+from ai_scientist.reliable.params import (
+    ensure_param_store_for_run,
+    params_index_for_prompt,
+)
+from ai_scientist.reliable.writeup_inputs import ensure_symbolic_writeup_inputs
+from ai_scientist.reliable.writeup_validation import validate_generated_writeup
+from ai_scientist.reliable.artifact_manifest import (
+    artifact_manifest_summary,
+    ensure_artifact_manifest,
+)
+from ai_scientist.reliable.context_packs import (
+    build_claim_context_pack,
+    build_writeup_context_pack,
+    save_context_pack,
+)
+from ai_scientist.reliable.remediation import (
+    build_remediation_prompt_block,
+    classify_remediation_failure,
+    print_remediation_report,
+    save_remediation_report,
+    remediation_retry_target,
+    should_reuse_symbolic_writeup_artifacts,
+)
+from ai_scientist.reliable.errors import SymbolicLatexError
+from ai_scientist.reliable.writeup_retry import (
+    has_validated_writeup,
+    restore_validated_writeup,
+    save_validated_writeup,
+)
+from ai_scientist.reliable.writeup_rules import (
+    build_reflection_guard_block,
+    build_writeup_mode_instructions,
+)
+from ai_scientist.reliable.claim_ledger import (
+    generate_claim_ledger,
+    save_claim_ledger,
+    validate_claim_ledger,
+)
+from ai_scientist.reliable.claim_traceability import (
+    build_claim_trace_index,
+    save_claim_trace_index,
+    validate_used_fact_traceability,
+)
+from ai_scientist.reliable.outsider_audit import (
+    build_outsider_audit_context_pack,
+    build_outsider_audit_inputs,
+    generate_outsider_audit,
+    save_outsider_audit,
+    validate_outsider_audit,
+)
+from ai_scientist.env_utils import env_bool, env_str
 
 
 def remove_accents_and_clean(s):
@@ -44,6 +103,81 @@ def remove_accents_and_clean(s):
     # Convert to lowercase
     ascii_str = ascii_str.lower()
     return ascii_str
+
+
+def _extract_latex_from_response(text: str) -> tuple[str | None, str]:
+    patterns: list[tuple[str, str]] = [
+        ("```latex```", r"```latex(.*?)```"),
+        ("```tex```", r"```tex(.*?)```"),
+        ("```fence```", r"```(.*?)```"),
+    ]
+    for label, pattern in patterns:
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            extracted = match.group(1).strip()
+            if "\\documentclass" in extracted and "\\end{document}" not in extracted:
+                extracted = extracted + "\n\\end{document}\n"
+                return extracted, label + " + appended \\end{document}"
+            return extracted, label
+
+    # Tolerate unterminated fences (common in streaming / partial responses).
+    unterminated_patterns: list[tuple[str, str]] = [
+        ("```latex (unterminated)```", r"```latex(.*)$"),
+        ("```tex (unterminated)```", r"```tex(.*)$"),
+        ("```fence (unterminated)```", r"```(.*)$"),
+    ]
+    for label, pattern in unterminated_patterns:
+        match = re.search(pattern, text, re.DOTALL)
+        if match:
+            extracted = match.group(1).strip()
+            if "\\documentclass" in extracted and "\\end{document}" not in extracted:
+                extracted = extracted + "\n\\end{document}\n"
+                return extracted, label + " + appended \\end{document}"
+            return extracted, label
+
+    doc_start = text.find("\\documentclass")
+    doc_end = text.rfind("\\end{document}")
+    if doc_start >= 0 and doc_end >= 0 and doc_end > doc_start:
+        return text[doc_start : doc_end + len("\\end{document}")].strip(), "documentclass"
+    if doc_start >= 0 and doc_end < 0:
+        extracted = text[doc_start:].strip()
+        extracted = extracted + "\n\\end{document}\n"
+        return extracted, "documentclass (unterminated) + appended \\end{document}"
+    return None, "none"
+
+
+def _extract_patch_from_response(text: str) -> dict[str, Any] | None:
+    json_output = extract_json_between_markers(text)
+    if not isinstance(json_output, dict):
+        return None
+    return json_output
+
+
+def _maybe_backanchor_numeric_literals(
+    latex_text: str,
+    *,
+    symbolic_facts: bool,
+    store,
+    param_store,
+) -> str:
+    if not symbolic_facts:
+        return latex_text
+    if store is None or param_store is None:
+        return latex_text
+    if not env_bool("AI_SCIENTIST_NUMERIC_BACKANCHOR", False):
+        return latex_text
+
+    from ai_scientist.reliable.numeric_backanchor import backanchor_numeric_literals
+
+    result = backanchor_numeric_literals(
+        latex_text,
+        store=store,
+        param_store=param_store,
+    )
+    if result.replacements:
+        summary = ", ".join(f"{k!r}x{v}" for k, v in sorted(result.replacements.items()))
+        print(f"[writeup] auto-anchored numeric literals to placeholders: {summary}")
+    return result.latex_text
 
 
 def _sanitize_template_tex_for_pdflatex(cwd: str) -> None:
@@ -535,31 +669,34 @@ This JSON will be automatically parsed, so ensure the format is precise."""
 
         json_output = extract_json_between_markers(text)
         assert json_output is not None, "Failed to extract JSON from LLM output"
-        desc = json_output["Description"]
-        selected_papers = str(json_output["Selected"])
-
-        if selected_papers != "[]":
-            selected_indices = []
-            for x in selected_papers.strip("[]").split(","):
-                x_str = x.strip().strip('"').strip("'")
-                if x_str:
-                    selected_indices.append(int(x_str))
-            assert all(
-                [0 <= i < len(papers) for i in selected_indices]
-            ), "Invalid paper index"
-            bibtexs = [papers[i]["citationStyles"]["bibtex"] for i in selected_indices]
-
-            cleaned_bibtexs = []
-            for bibtex in bibtexs:
-                newline_index = bibtex.find("\n")
-                cite_key_line = bibtex[:newline_index]
-                cite_key_line = remove_accents_and_clean(cite_key_line)
-                cleaned_bibtexs.append(cite_key_line + bibtex[newline_index:])
-            bibtexs = cleaned_bibtexs
-
-            bibtex_string = "\n".join(bibtexs)
-        else:
+        desc_raw = json_output.get("Description", json_output.get("description", ""))
+        desc = str(desc_raw).strip()
+        selected_raw = json_output.get("Selected", json_output.get("selected"))
+        if selected_raw is None:
+            print("[citations] selection JSON missing 'Selected'; skipping.")
             return None, False
+        if isinstance(selected_raw, list):
+            selected_indices = [int(x) for x in selected_raw]
+        else:
+            selected_indices = [
+                int(x) for x in re.findall(r"-?\d+", str(selected_raw))
+            ]
+
+        if not selected_indices:
+            return None, False
+
+        assert all([0 <= i < len(papers) for i in selected_indices]), "Invalid paper index"
+        bibtexs = [papers[i]["citationStyles"]["bibtex"] for i in selected_indices]
+
+        cleaned_bibtexs = []
+        for bibtex in bibtexs:
+            newline_index = bibtex.find("\n")
+            cite_key_line = bibtex[:newline_index]
+            cite_key_line = remove_accents_and_clean(cite_key_line)
+            cleaned_bibtexs.append(cite_key_line + bibtex[newline_index:])
+        bibtexs = cleaned_bibtexs
+
+        bibtex_string = "\n".join(bibtexs)
 
     except Exception:
         print("EXCEPTION in get_citation_addition (selecting papers):")
@@ -635,47 +772,32 @@ Ensure you are always writing good compilable LaTeX code. Common mistakes that s
 - Do not hallucinate new citations or any results not in the logs.
 
 Ensure proper citation usage:
-- Always include references within \begin{{filecontents}}{{references.bib}} ... \end{{filecontents}}, even if they haven't changed from the previous round.
+- Always include references within \\begin{{filecontents}}{{references.bib}} ... \\end{{filecontents}}, even if they haven't changed from the previous round.
 - Use citations from the provided references.bib content.
 - Each section (especially Related Work) should have multiple citations.
 
 When returning final code, place it in fenced triple backticks with 'latex' syntax highlighting.
 """
 
-writeup_prompt = """Your goal is to write up the following idea:
+writeup_prompt = """{facts_instructions}
+{facts_priority_block}
+{remediation_instructions}
+
+Your goal is to write up the following idea:
 
 ```markdown
 {idea_text}
 ```
 
-We have the following experiment summaries (JSON):
+We have the following canonical writeup context pack (JSON):
 ```json
-{summaries}
+{writeup_context_pack}
 ```
 
-We also have a script used to produce the final plots (use this to see how the plots are generated and what names are used in the legend):
-```python
-{aggregator_code}
-```
-Please also consider which plots can naturally be grouped together as subfigures.
-
-Available plots for the writeup (use these filenames):
-```
-{plot_list}
-```
-
-We also have VLM-based figure descriptions:
-```
-{plot_descriptions}
-```
-
-Your current progress on the LaTeX write-up is:
-```latex
-{latex_writeup}
-```
+{plot_generation_notes}
 
 Produce the final version of the LaTeX manuscript now, ensuring the paper is coherent, concise, and reports results accurately.
-Return the entire file in full, with no unfilled placeholders!
+Return the entire file in full.
 This must be an acceptable complete LaTeX writeup, suitable for a 4-page single-column workshop paper.
 Make sure to use the citations from the references.bib file.
 
@@ -811,6 +933,14 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="deepseek-chat
         try:
             with open(citations_cache_path, "r") as f:
                 citations_text = f.read()
+            citations_text, bibtex_replacements = sanitize_bibtex_text_for_pdflatex(citations_text)
+            if bibtex_replacements:
+                print(
+                    "[citations] sanitized cached citations for pdflatex: "
+                    + ", ".join(f"{k}x{v}" for k, v in sorted(bibtex_replacements.items()))
+                )
+                with open(citations_cache_path, "w") as f:
+                    f.write(citations_text)
             with open(progress_path, "r") as f:
                 progress = json.load(f)
                 current_round = progress.get("completed_rounds", 0)
@@ -858,6 +988,7 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="deepseek-chat
                     break
 
                 if addition is not None:
+                    addition, _ = sanitize_bibtex_text_for_pdflatex(addition)
                     # Simple check to avoid duplicating the same title
                     title_match = re.search(r" title = {(.*?)}", addition)
                     if title_match:
@@ -948,35 +1079,72 @@ def perform_writeup(
     big_model="deepseek-chat",
     n_writeup_reflections=3,
     page_limit=4,
+    symbolic_facts: bool = False,
+    remediation_context: dict[str, object] | None = None,
 ):
     pdf_file = osp.join(base_folder, f"{osp.basename(base_folder)}.pdf")
     latex_folder = osp.join(base_folder, "latex")
+    writeup_file = osp.join(latex_folder, "template.tex")
+    used_facts_path = osp.join(latex_folder, "used_facts.json")
+    retry_target = remediation_retry_target(remediation_context)
+    reuse_existing_writeup = (
+        symbolic_facts and retry_target == "writeup" and has_validated_writeup(latex_folder)
+    )
+    reuse_symbolic_artifacts = (
+        symbolic_facts
+        and should_reuse_symbolic_writeup_artifacts(remediation_context)
+        and osp.exists(writeup_file)
+        and osp.exists(used_facts_path)
+    )
 
-    # Cleanup any previous latex folder and pdf
-    if osp.exists(latex_folder):
-        shutil.rmtree(latex_folder)
-    if osp.exists(pdf_file):
-        os.remove(pdf_file)
-
-    # Remove any previous reflection PDFs
-    for old_pdf in os.listdir(base_folder):
-        if old_pdf.endswith(".pdf") and "reflection" in old_pdf:
-            os.remove(osp.join(base_folder, old_pdf))
+    if not reuse_existing_writeup and not reuse_symbolic_artifacts:
+        if osp.exists(latex_folder):
+            shutil.rmtree(latex_folder)
+        if osp.exists(pdf_file):
+            os.remove(pdf_file)
+        for old_pdf in os.listdir(base_folder):
+            if old_pdf.endswith(".pdf") and "reflection" in old_pdf:
+                os.remove(osp.join(base_folder, old_pdf))
 
     try:
         idea_text = load_idea_text(base_folder)
-        exp_summaries = load_exp_summaries(base_folder)
-        filtered_summaries_for_writeup = filter_experiment_summaries(
-            exp_summaries, step_name="writeup"
-        )
-        # Convert them to one big JSON string for context
-        combined_summaries_str = json.dumps(filtered_summaries_for_writeup, indent=2)
+        facts_instructions = ""
+        facts_index = ""
+        params_index = ""
+        param_store = None
+        summaries_for_prompt = {}
+        remediation_instructions = build_remediation_prompt_block(remediation_context)
+        fact_store_path = osp.join(base_folder, "logs", "0-run", "fact_store.json")
+        param_store_path = osp.join(base_folder, "logs", "0-run", "param_store.json")
+        if symbolic_facts:
+            store, writeup_summary_symbolic = ensure_symbolic_writeup_inputs(base_folder)
+            param_store = ensure_param_store_for_run(base_folder)
+            if not store.facts:
+                raise RuntimeError(
+                    "Symbolic-facts writeup requested but FactStore is empty. "
+                    "Ensure baseline_summary.json and research_summary.json exist under logs/0-run."
+                )
 
+            facts_index = facts_index_for_prompt(store)
+            params_index = params_index_for_prompt(param_store)
+            facts_instructions = build_writeup_mode_instructions(symbolic_facts)
+            summaries_for_prompt = {
+                "WRITEUP_SYMBOLIC_SUMMARY": writeup_summary_symbolic,
+            }
+        else:
+            exp_summaries = load_exp_summaries(base_folder)
+            filtered_summaries_for_writeup = filter_experiment_summaries(
+                exp_summaries, step_name="writeup"
+            )
+            facts_instructions = build_writeup_mode_instructions(symbolic_facts)
+            summaries_for_prompt = filtered_summaries_for_writeup
         # Prepare a new fresh latex folder
         if not osp.exists(osp.join(latex_folder, "template.tex")):
             shutil.copytree(
                 "ai_scientist/blank_icbinb_latex", latex_folder, dirs_exist_ok=True
             )
+        if reuse_existing_writeup and restore_validated_writeup(latex_folder, writeup_file):
+            print("[writeup] restored last validated symbolic draft for retry")
 
         writeup_file = osp.join(latex_folder, "template.tex")
         with open(writeup_file, "r") as f:
@@ -990,17 +1158,27 @@ def perform_writeup(
                 if fplot.lower().endswith(".png"):
                     plot_names.append(fplot)
 
-        # Load aggregator script to include in the prompt
-        aggregator_path = osp.join(base_folder, "auto_plot_aggregator.py")
-        aggregator_code = ""
-        if osp.exists(aggregator_path):
-            with open(aggregator_path, "r") as fa:
-                aggregator_code = fa.read()
-        else:
-            aggregator_code = "No aggregator script found."
+        manifest = None
+        manifest_summary_str = "{}"
+        if symbolic_facts:
+            manifest = ensure_artifact_manifest(base_folder=base_folder, store=store)
+            manifest_summary_str = json.dumps(
+                artifact_manifest_summary(manifest),
+                indent=2,
+            )
 
         if no_writing:
-            compile_latex(latex_folder, pdf_file)
+            if symbolic_facts:
+                compile_symbolic_latex_project(
+                    latex_folder=latex_folder,
+                    pdf_file=pdf_file,
+                    fact_store_path=fact_store_path,
+                    param_store_path=param_store_path,
+                    rendered_tex_artifact_path=osp.join(latex_folder, "template.rendered.tex"),
+                    used_facts_artifact_path=osp.join(latex_folder, "used_facts.json"),
+                )
+            else:
+                compile_latex(latex_folder, pdf_file)
             return osp.exists(pdf_file)
 
         # If no citations provided, try to load from cache first
@@ -1025,7 +1203,13 @@ def perform_writeup(
                     citations_text = ""
 
         # Insert citations into template.tex
-        if citations_text:
+        if citations_text and not reuse_existing_writeup:
+            citations_text, bibtex_replacements = sanitize_bibtex_text_for_pdflatex(citations_text)
+            if bibtex_replacements:
+                print(
+                    "[citations] sanitized citations for pdflatex before embedding: "
+                    + ", ".join(f"{k}x{v}" for k, v in sorted(bibtex_replacements.items()))
+                )
             with open(writeup_file, "r") as f:
                 content = f.read()
             pattern_end = r"\end{filecontents}"
@@ -1033,68 +1217,169 @@ def perform_writeup(
             with open(writeup_file, "w") as f:
                 f.write(content)
 
-        # Generate VLM-based descriptions
-        try:
+        desc_map = {}
+        plot_generation_notes = ""
+        vlm_client = None
+        vlm_model = None
+        if n_writeup_reflections > 0 or not symbolic_facts:
             vlm_client, vlm_model = create_vlm_client(small_model)
-            desc_map = {}
-            for pf in plot_names:
-                ppath = osp.join(figures_dir, pf)
-                if not osp.exists(ppath):
-                    continue
-                img_dict = {
-                    "images": [ppath],
-                    "caption": "No direct caption",
-                }
-                review_data = generate_vlm_img_review(img_dict, vlm_model, vlm_client)
-                if review_data:
-                    desc_map[pf] = review_data.get(
-                        "Img_description", "No description found"
-                    )
-                else:
-                    desc_map[pf] = "No description found"
+        if not symbolic_facts:
+            aggregator_path = osp.join(base_folder, "auto_plot_aggregator.py")
+            aggregator_code = "No aggregator script found."
+            if osp.exists(aggregator_path):
+                with open(aggregator_path, "r") as fa:
+                    aggregator_code = fa.read()
+            try:
+                for pf in plot_names:
+                    ppath = osp.join(figures_dir, pf)
+                    if not osp.exists(ppath):
+                        continue
+                    img_dict = {
+                        "images": [ppath],
+                        "caption": "No direct caption",
+                    }
+                    review_data = generate_vlm_img_review(img_dict, vlm_model, vlm_client)
+                    if review_data:
+                        desc_map[pf] = review_data.get(
+                            "Img_description", "No description found"
+                        )
+                    else:
+                        desc_map[pf] = "No description found"
 
-            plot_descriptions_list = []
-            for fname in plot_names:
-                desc_text = desc_map.get(fname, "No description found")
-                plot_descriptions_list.append(f"{fname}: {desc_text}")
-            plot_descriptions_str = "\n".join(plot_descriptions_list)
-        except Exception:
-            print("EXCEPTION in VLM figure description generation:")
-            print(traceback.format_exc())
-            plot_descriptions_str = "No descriptions available."
+            except Exception:
+                print("EXCEPTION in VLM figure description generation:")
+                print(traceback.format_exc())
+                desc_map = {}
+            plot_generation_notes = (
+                "We also have a script used to produce the final plots "
+                "(use this to see how the plots are generated and what names are used in the legend):\n"
+                "```python\n"
+                f"{aggregator_code}\n"
+                "```\n"
+                "Please also consider which plots can naturally be grouped together as subfigures."
+            )
 
         big_model_system_message = writeup_system_message_template.format(
             page_limit=page_limit
         )
+        if symbolic_facts:
+            big_model_system_message = (
+                big_model_system_message + "\n\n" + facts_instructions
+            )
         big_client, big_client_model = create_client(big_model)
         with open(writeup_file, "r") as f:
             writeup_text = f.read()
+        writeup_context_pack = build_writeup_context_pack(
+            symbolic_facts=symbolic_facts,
+            summaries_for_prompt=summaries_for_prompt,
+            facts_index=facts_index,
+            params_index=params_index,
+            artifact_manifest_summary=json.loads(manifest_summary_str),
+            current_latex=writeup_text,
+            plot_names=plot_names,
+            plot_descriptions=desc_map,
+        )
+        save_context_pack(
+            osp.join(latex_folder, "writeup_context_pack.json"),
+            writeup_context_pack,
+        )
+
+        facts_priority_block = ""
+        if symbolic_facts:
+            preferred = writeup_context_pack.get("preferred_fact_refs")
+            if isinstance(preferred, list) and preferred:
+                lines = ["PRIORITY FACT KEYS (must use at least 1 in main text):"]
+                for item in preferred[:8]:
+                    if not isinstance(item, dict):
+                        continue
+                    key = str(item.get("key") or "").strip()
+                    meaning = str(item.get("meaning") or "").strip().replace("\n", " ")
+                    if not key or not meaning:
+                        continue
+                    lines.append(f"- {key}: {meaning}")
+                facts_priority_block = "\n".join(lines)
 
         combined_prompt = writeup_prompt.format(
             idea_text=idea_text,
-            summaries=combined_summaries_str,
-            aggregator_code=aggregator_code,
-            plot_list=", ".join(plot_names),
-            latex_writeup=writeup_text,
-            plot_descriptions=plot_descriptions_str,
+            writeup_context_pack=json.dumps(writeup_context_pack, indent=2),
+            facts_instructions=facts_instructions,
+            facts_priority_block=facts_priority_block,
+            remediation_instructions=remediation_instructions,
+            plot_generation_notes=plot_generation_notes,
         )
+
+        writeup_client = big_client
+        writeup_client_model = big_client_model
+        if symbolic_facts and remediation_context is not None and retry_target == "writeup":
+            writeup_client, writeup_client_model = create_client(small_model)
+            print(f"[writeup] remediation retry using repair model: {small_model}")
 
         response, msg_history = get_response_from_llm(
             prompt=combined_prompt,
-            client=big_client,
-            model=big_client_model,
+            client=writeup_client,
+            model=writeup_client_model,
             system_message=big_model_system_message,
             print_debug=False,
         )
 
-        latex_code_match = re.search(r"```latex(.*?)```", response, re.DOTALL)
-        if not latex_code_match:
-            return False
-        updated_latex_code = latex_code_match.group(1).strip()
+        updated_latex_code, extract_kind = _extract_latex_from_response(response)
+        if updated_latex_code is None:
+            raise SymbolicLatexError(
+                "LLM response did not contain a complete ```latex``` block."
+            )
+        if extract_kind != "```latex```":
+            print(f"[writeup] extracted LaTeX via {extract_kind} (expected ```latex``` fence)")
+        updated_latex_code, fixup_report = fixup_latex_before_validation(
+            updated_latex_code,
+            scaffold_tex=writeup_text,
+        )
+        if fixup_report.scaffold_preserved:
+            print("[writeup] preserved canonical LaTeX scaffold before validation")
+        if fixup_report.embedded_label_fixes:
+            print(
+                "[writeup] normalized malformed includegraphics blocks before validation: "
+                f"{fixup_report.embedded_label_fixes}"
+            )
+        if fixup_report.bibliography_fixed:
+            print("[writeup] normalized \\bibliography database to references before validation")
+        if fixup_report.end_document_appended:
+            print("[writeup] appended missing \\end{document} before validation")
+        updated_latex_code = _maybe_backanchor_numeric_literals(
+            updated_latex_code,
+            symbolic_facts=symbolic_facts,
+            store=store if symbolic_facts else None,
+            param_store=param_store if symbolic_facts else None,
+        )
         with open(writeup_file, "w") as f:
             f.write(updated_latex_code)
+        validate_generated_writeup(
+            updated_latex_code,
+            symbolic_facts=symbolic_facts,
+            store=store if symbolic_facts else None,
+            param_store=param_store if symbolic_facts else None,
+            artifact_manifest=manifest,
+        )
+        current_latex = updated_latex_code
+
+        if n_writeup_reflections <= 0:
+            if symbolic_facts:
+                compile_symbolic_latex_project(
+                    latex_folder=latex_folder,
+                    pdf_file=pdf_file,
+                    fact_store_path=fact_store_path,
+                    param_store_path=param_store_path,
+                    rendered_tex_artifact_path=osp.join(
+                        latex_folder, "template.rendered.tex"
+                    ),
+                    used_facts_artifact_path=osp.join(latex_folder, "used_facts.json"),
+                )
+                save_validated_writeup(latex_folder, updated_latex_code)
+            else:
+                compile_latex(latex_folder, pdf_file)
+        final_pdf_path = pdf_file
 
         # Multiple reflection loops on the final LaTeX
+        reflection_aborted = False
         for i in range(n_writeup_reflections):
             with open(writeup_file, "r") as f:
                 current_latex = f.read()
@@ -1114,7 +1399,19 @@ def perform_writeup(
             )
             # Compile current version before reflection
             print(f"[green]Compiling PDF for reflection {i+1}...[/green]")
-            compile_latex(latex_folder, reflection_pdf)
+            if symbolic_facts:
+                compile_symbolic_latex_project(
+                    latex_folder=latex_folder,
+                    pdf_file=reflection_pdf,
+                    fact_store_path=fact_store_path,
+                    param_store_path=param_store_path,
+                    rendered_tex_artifact_path=osp.join(latex_folder, "template.rendered.tex"),
+                    used_facts_artifact_path=osp.join(latex_folder, "used_facts.json"),
+                )
+                save_validated_writeup(latex_folder, current_latex)
+            else:
+                compile_latex(latex_folder, reflection_pdf)
+            final_pdf_path = reflection_pdf
 
             review_img_cap_ref = perform_imgs_cap_ref_review(
                 vlm_client, vlm_model, reflection_pdf
@@ -1133,7 +1430,40 @@ def perform_writeup(
                 f"chktex {writeup_file} -q -n2 -n24 -n13 -n1"
             ).read()
 
-            reflection_prompt = f"""
+            reflection_guard_block = build_reflection_guard_block(
+                symbolic_facts=symbolic_facts,
+                remediation_instructions=remediation_instructions,
+            )
+
+            patch_contract = (
+                "PATCH MODE (symbolic-facts reflection):\n"
+                "- Do NOT return full template.tex; do NOT touch the scaffold before \\end{filecontents}.\n"
+                "- Return a JSON object with a single key: ops.\n"
+                "- If no changes are needed, return: {\"ops\": []}\n"
+                "- Allowed ops:\n"
+                "  - replace_abstract: {\"op\":\"replace_abstract\",\"text\":\"...\"}\n"
+                "  - replace_section: {\"op\":\"replace_section\",\"section_label\":\"sec:intro\",\"text\":\"...\"}\n"
+                "    (or use section_title instead of section_label)\n"
+                "  - replace_between: {\"op\":\"replace_between\",\"start\":\"...\",\"end\":\"...\",\"text\":\"...\"}\n"
+                "  - insert_after: {\"op\":\"insert_after\",\"anchor\":\"...\",\"text\":\"...\"}\n"
+                "  - delete_between: {\"op\":\"delete_between\",\"start\":\"...\",\"end\":\"...\"}\n"
+                "- Hard rules:\n"
+                "  - Do not remove any existing \\fact{...} or \\param{...} placeholders.\n"
+                "  - Do not introduce numeric literals; keep results symbolic.\n"
+                "  - Keep LaTeX compilable.\n"
+                "Return format:\n"
+                "RESPONSE:\n"
+                "```json\n"
+                "{\"ops\": [...]} \n"
+                "```\n"
+            )
+
+            current_editable = ""
+            if symbolic_facts:
+                current_editable = editable_suffix(current_latex)
+
+            reflection_prompt = (
+                f"""
 Now let's reflect and identify any issues (including but not limited to):
 1) Are there any LaTeX syntax errors or style violations we can fix? Refer to the chktex output below.
 2) Is the writing clear, and scientifically rigorous for a workshop focusing on real-world pitfalls?
@@ -1158,14 +1488,22 @@ VLM reviews:
 {analysis_duplicate_figs}
 ```
 
-Please provide a revised complete LaTeX in triple backticks, or repeat the same if no changes are needed.
-Return the entire file in full, with no unfilled placeholders!
-This must be an acceptable complete LaTeX writeup.
-Do not hallucinate any details!
-Ensure proper citation usage:
-- Always include references within \begin{{filecontents}}{{references.bib}} ... \end{{filecontents}}, even if they haven't changed from the previous round.
-- Use citations from the provided references.bib content.
+            {reflection_guard_block}
 """
+                + (
+                    f"\n{patch_contract}\n\nCURRENT EDITABLE LaTeX (after \\end{{filecontents}}):\n```latex\n{current_editable}\n```\n"
+                    if symbolic_facts
+                    else (
+                        "\n"
+                        "Please provide a revised complete LaTeX in triple backticks, or repeat the same if no changes are needed.\n"
+                        "Return the entire file in full. This must be an acceptable complete LaTeX writeup.\n"
+                        "Do not hallucinate any details!\n"
+                        "Ensure proper citation usage:\n"
+                        "- Always include references within \\\\begin{filecontents}{references.bib} ... \\\\end{filecontents}, even if they haven't changed from the previous round.\n"
+                        "- Use citations from the provided references.bib content.\n"
+                    )
+                )
+            )
 
             reflection_response, msg_history = get_response_from_llm(
                 prompt=reflection_prompt,
@@ -1176,39 +1514,137 @@ Ensure proper citation usage:
                 print_debug=False,
             )
 
-            # 2nd run:
-            reflection_code_match = re.search(
-                r"```latex(.*?)```", reflection_response, re.DOTALL
-            )
-            if reflection_code_match:
-                reflected_latex_code = reflection_code_match.group(1).strip()
-                if reflected_latex_code != current_latex:
-                    final_text = reflected_latex_code
-                    cleanup_map = {
-                        "</end": r"\\end",
-                        "</begin": r"\\begin",
-                        "’": "'",
-                    }
-                    for bad_str, repl_str in cleanup_map.items():
-                        final_text = final_text.replace(bad_str, repl_str)
-                    final_text = re.sub(r"(\d+(?:\.\d+)?)%", r"\1\\%", final_text)
-
-                    with open(writeup_file, "w") as fo:
-                        fo.write(final_text)
-
-                    compile_latex(latex_folder, reflection_pdf)
-                else:
+            if symbolic_facts:
+                patch_json = _extract_patch_from_response(reflection_response)
+                if patch_json is None:
+                    print(f"No valid JSON patch found in reflection step {i+1}.")
+                    break
+                ops = patch_json.get("ops")
+                if not ops:
                     print(f"No changes in reflection step {i+1}.")
                     break
+                try:
+                    patch_result = apply_latex_patch_ops(current_latex, patch_json)
+                    final_text, fixup_report = fixup_latex_before_validation(
+                        patch_result.latex_text,
+                        scaffold_tex=current_latex,
+                    )
+                    if fixup_report.scaffold_preserved:
+                        print(
+                            "[writeup] preserved canonical LaTeX scaffold after reflection patch"
+                        )
+                    if fixup_report.embedded_label_fixes:
+                        print(
+                            "[writeup] normalized malformed includegraphics blocks after reflection patch: "
+                            f"{fixup_report.embedded_label_fixes}"
+                        )
+                    final_text = _maybe_backanchor_numeric_literals(
+                        final_text,
+                        symbolic_facts=symbolic_facts,
+                        store=store,
+                        param_store=param_store,
+                    )
+                    validate_generated_writeup(
+                        final_text,
+                        symbolic_facts=symbolic_facts,
+                        store=store if symbolic_facts else None,
+                        param_store=param_store if symbolic_facts else None,
+                        artifact_manifest=manifest,
+                    )
+                    with open(writeup_file, "w") as fo:
+                        fo.write(final_text)
+                    compile_symbolic_latex_project(
+                        latex_folder=latex_folder,
+                        pdf_file=reflection_pdf,
+                        fact_store_path=fact_store_path,
+                        param_store_path=param_store_path,
+                        rendered_tex_artifact_path=osp.join(
+                            latex_folder, "template.rendered.tex"
+                        ),
+                        used_facts_artifact_path=osp.join(latex_folder, "used_facts.json"),
+                    )
+                    save_validated_writeup(latex_folder, final_text)
+                    current_latex = final_text
+                    final_pdf_path = reflection_pdf
+                except Exception as exc:
+                    with open(writeup_file, "w") as fo:
+                        fo.write(current_latex)
+                    print(
+                        f"[writeup] discarded reflection {i+1} patch and kept previous validated draft: {exc}"
+                    )
+                    reflection_aborted = True
+                    break
             else:
-                print(f"No valid LaTeX code block found in reflection step {i+1}.")
-                break
+                reflection_code_match = re.search(
+                    r"```latex(.*?)```", reflection_response, re.DOTALL
+                )
+                if reflection_code_match:
+                    reflected_latex_code = reflection_code_match.group(1).strip()
+                    final_text, normalization = normalize_generated_latex_draft(
+                        reflected_latex_code,
+                        scaffold_tex=current_latex,
+                    )
+                    if final_text != current_latex:
+                        if normalization["scaffold_preserved"]:
+                            print(
+                                "[writeup] preserved canonical LaTeX scaffold after reflection"
+                            )
+                        if normalization["embedded_label_fixes"]:
+                            print(
+                                "[writeup] normalized malformed includegraphics blocks after reflection: "
+                                f"{normalization['embedded_label_fixes']}"
+                            )
+                        try:
+                            validate_generated_writeup(
+                                final_text,
+                                symbolic_facts=symbolic_facts,
+                                store=store if symbolic_facts else None,
+                                param_store=param_store if symbolic_facts else None,
+                                artifact_manifest=manifest,
+                            )
+                            with open(writeup_file, "w") as fo:
+                                fo.write(final_text)
+                            if symbolic_facts:
+                                compile_symbolic_latex_project(
+                                    latex_folder=latex_folder,
+                                    pdf_file=reflection_pdf,
+                                    fact_store_path=fact_store_path,
+                                    param_store_path=param_store_path,
+                                    rendered_tex_artifact_path=osp.join(
+                                        latex_folder, "template.rendered.tex"
+                                    ),
+                                    used_facts_artifact_path=osp.join(latex_folder, "used_facts.json"),
+                                )
+                                save_validated_writeup(latex_folder, final_text)
+                            else:
+                                compile_latex(latex_folder, reflection_pdf)
+                            current_latex = final_text
+                            final_pdf_path = reflection_pdf
+                        except Exception as exc:
+                            with open(writeup_file, "w") as fo:
+                                fo.write(current_latex)
+                            print(
+                                f"[writeup] discarded reflection {i+1} revision and kept previous validated draft: {exc}"
+                            )
+                            reflection_aborted = True
+                            break
+                    else:
+                        print(f"No changes in reflection step {i+1}.")
+                        break
+                else:
+                    print(f"No valid LaTeX code block found in reflection step {i+1}.")
+                    break
             # Get new reflection_page_info
             reflection_page_info = get_reflection_page_info(reflection_pdf, page_limit)
             review_img_selection = perform_imgs_cap_ref_review_selection(
                 vlm_client, vlm_model, reflection_pdf, reflection_page_info
             )
-            img_reflection_prompt = f"""Now let's reflect on
+            current_editable = ""
+            if symbolic_facts:
+                current_editable = editable_suffix(current_latex)
+
+            img_reflection_prompt = (
+                f"""Now let's reflect on
 The following figures are currently used in the paper: {sorted(used_figs)}
 The following figures are available in the folder but not used in the LaTeX: {sorted(unused_figs)}
 
@@ -1227,8 +1663,16 @@ Please review the figures and make the following changes:
 
 Please ensure all changes maintain scientific rigor and improve the paper's clarity and impact.
 Be more aggressive with figure selection - move more figures to the appendix or group them together with other figures if the page limit is already exceeded.
+{reflection_guard_block}
 
-If you believe you are done with reflection, simply say: "I am done"."""
+If you believe you are done with reflection, simply say: "I am done".
+"""
+                + (
+                    f"\n{patch_contract}\n\nCURRENT EDITABLE LaTeX (after \\end{{filecontents}}):\n```latex\n{current_editable}\n```\n"
+                    if symbolic_facts
+                    else "If you make changes, return the full revised LaTeX in triple backticks."
+                )
+            )
             reflection_response, msg_history = get_response_from_llm(
                 prompt=img_reflection_prompt,
                 client=big_client,
@@ -1244,86 +1688,381 @@ If you believe you are done with reflection, simply say: "I am done"."""
                 )
                 break
 
-            reflection_code_match = re.search(
-                r"```latex(.*?)```", reflection_response, re.DOTALL
-            )
-            if reflection_code_match:
-                reflected_latex_code = reflection_code_match.group(1).strip()
-                if reflected_latex_code != current_latex:
-                    final_text = reflected_latex_code
-                    cleanup_map = {
-                        "</end": r"\\end",
-                        "</begin": r"\\begin",
-                        "’": "'",
-                    }
-                    for bad_str, repl_str in cleanup_map.items():
-                        final_text = final_text.replace(bad_str, repl_str)
-                    final_text = re.sub(r"(\d+(?:\.\d+)?)%", r"\1\\%", final_text)
-
-                    with open(writeup_file, "w") as fo:
-                        fo.write(final_text)
-
-                    compile_latex(latex_folder, reflection_pdf)
-                else:
+            if symbolic_facts:
+                patch_json = _extract_patch_from_response(reflection_response)
+                if patch_json is None:
+                    print(f"No valid JSON patch found in figure reflection step {i+1}.")
+                    break
+                ops = patch_json.get("ops")
+                if not ops:
                     print(f"No changes in reflection step {i+1}.")
                     break
+                try:
+                    patch_result = apply_latex_patch_ops(current_latex, patch_json)
+                    final_text, fixup_report = fixup_latex_before_validation(
+                        patch_result.latex_text,
+                        scaffold_tex=current_latex,
+                    )
+                    if fixup_report.scaffold_preserved:
+                        print(
+                            "[writeup] preserved canonical LaTeX scaffold after figure reflection patch"
+                        )
+                    if fixup_report.embedded_label_fixes:
+                        print(
+                            "[writeup] normalized malformed includegraphics blocks after figure reflection patch: "
+                            f"{fixup_report.embedded_label_fixes}"
+                        )
+                    final_text = _maybe_backanchor_numeric_literals(
+                        final_text,
+                        symbolic_facts=symbolic_facts,
+                        store=store,
+                        param_store=param_store,
+                    )
+                    validate_generated_writeup(
+                        final_text,
+                        symbolic_facts=symbolic_facts,
+                        store=store if symbolic_facts else None,
+                        param_store=param_store if symbolic_facts else None,
+                        artifact_manifest=manifest,
+                    )
+                    with open(writeup_file, "w") as fo:
+                        fo.write(final_text)
+                    compile_symbolic_latex_project(
+                        latex_folder=latex_folder,
+                        pdf_file=reflection_pdf,
+                        fact_store_path=fact_store_path,
+                        param_store_path=param_store_path,
+                        rendered_tex_artifact_path=osp.join(
+                            latex_folder, "template.rendered.tex"
+                        ),
+                        used_facts_artifact_path=osp.join(latex_folder, "used_facts.json"),
+                    )
+                    save_validated_writeup(latex_folder, final_text)
+                    current_latex = final_text
+                    final_pdf_path = reflection_pdf
+                except Exception as exc:
+                    with open(writeup_file, "w") as fo:
+                        fo.write(current_latex)
+                    print(
+                        f"[writeup] discarded figure reflection {i+1} patch and kept previous validated draft: {exc}"
+                    )
+                    reflection_aborted = True
+                    break
             else:
-                print(f"No valid LaTeX code block found in reflection step {i+1}.")
-                break
+                reflection_code_match = re.search(
+                    r"```latex(.*?)```", reflection_response, re.DOTALL
+                )
+                if reflection_code_match:
+                    reflected_latex_code = reflection_code_match.group(1).strip()
+                    final_text, normalization = normalize_generated_latex_draft(
+                        reflected_latex_code,
+                        scaffold_tex=current_latex,
+                    )
+                    if final_text != current_latex:
+                        if normalization["scaffold_preserved"]:
+                            print(
+                                "[writeup] preserved canonical LaTeX scaffold after figure reflection"
+                            )
+                        if normalization["embedded_label_fixes"]:
+                            print(
+                                "[writeup] normalized malformed includegraphics blocks after figure reflection: "
+                                f"{normalization['embedded_label_fixes']}"
+                            )
+                        try:
+                            validate_generated_writeup(
+                                final_text,
+                                symbolic_facts=symbolic_facts,
+                                store=store if symbolic_facts else None,
+                                param_store=param_store if symbolic_facts else None,
+                                artifact_manifest=manifest,
+                            )
+                            with open(writeup_file, "w") as fo:
+                                fo.write(final_text)
+                            if symbolic_facts:
+                                compile_symbolic_latex_project(
+                                    latex_folder=latex_folder,
+                                    pdf_file=reflection_pdf,
+                                    fact_store_path=fact_store_path,
+                                    param_store_path=param_store_path,
+                                    rendered_tex_artifact_path=osp.join(
+                                        latex_folder, "template.rendered.tex"
+                                    ),
+                                    used_facts_artifact_path=osp.join(latex_folder, "used_facts.json"),
+                                )
+                                save_validated_writeup(latex_folder, final_text)
+                            else:
+                                compile_latex(latex_folder, reflection_pdf)
+                            current_latex = final_text
+                            final_pdf_path = reflection_pdf
+                        except Exception as exc:
+                            with open(writeup_file, "w") as fo:
+                                fo.write(current_latex)
+                            print(
+                                f"[writeup] discarded figure reflection {i+1} revision and kept previous validated draft: {exc}"
+                            )
+                            reflection_aborted = True
+                            break
+                    else:
+                        print(f"No changes in reflection step {i+1}.")
+                        break
+                else:
+                    print(f"No valid LaTeX code block found in reflection step {i+1}.")
+                    break
 
-        # Final reflection on page limit
-        # Save PDF with reflection
+        if n_writeup_reflections > 0 and not reflection_aborted:
+            reflection_page_info = get_reflection_page_info(reflection_pdf, page_limit)
 
-        # Get new reflection_page_info
-        reflection_page_info = get_reflection_page_info(reflection_pdf, page_limit)
+            current_editable = ""
+            if symbolic_facts:
+                current_editable = editable_suffix(current_latex)
 
-        final_reflection_prompt = """{reflection_page_info}
-USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE."""
-        reflection_response, msg_history = get_response_from_llm(
-            prompt=final_reflection_prompt,
-            client=big_client,
-            model=big_client_model,
-            system_message=big_model_system_message,
-            msg_history=msg_history[-1:],
-            print_debug=False,
-        )
+            final_reflection_prompt = (
+                f"""{reflection_page_info}
+USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE.
+{build_reflection_guard_block(symbolic_facts=symbolic_facts, remediation_instructions=remediation_instructions)}
+"""
+                + (
+                    f"\n{patch_contract}\n\nCURRENT EDITABLE LaTeX (after \\end{{filecontents}}):\n```latex\n{current_editable}\n```\n"
+                    if symbolic_facts
+                    else "If you make changes, return the full revised LaTeX in triple backticks. Otherwise repeat the current full LaTeX."
+                )
+            )
+            reflection_response, msg_history = get_response_from_llm(
+                prompt=final_reflection_prompt,
+                client=big_client,
+                model=big_client_model,
+                system_message=big_model_system_message,
+                msg_history=msg_history[-1:],
+                print_debug=False,
+            )
 
-        reflection_pdf = osp.join(
-            base_folder, f"{osp.basename(base_folder)}_reflection_final_page_limit.pdf"
-        )
-        # Compile current version before reflection
-        print(f"[green]Compiling PDF for reflection final page limit...[/green]")
+            reflection_pdf = osp.join(
+                base_folder, f"{osp.basename(base_folder)}_reflection_final_page_limit.pdf"
+            )
+            print(f"[green]Compiling PDF for reflection final page limit...[/green]")
+            print(f"reflection step {i+1}")
 
-        print(f"reflection step {i+1}")
-
-        reflection_code_match = re.search(
-            r"```latex(.*?)```", reflection_response, re.DOTALL
-        )
-        if reflection_code_match:
-            reflected_latex_code = reflection_code_match.group(1).strip()
-            if reflected_latex_code != current_latex:
-                final_text = reflected_latex_code
-                cleanup_map = {
-                    "</end": r"\\end",
-                    "</begin": r"\\begin",
-                    "’": "'",
-                }
-                for bad_str, repl_str in cleanup_map.items():
-                    final_text = final_text.replace(bad_str, repl_str)
-                final_text = re.sub(r"(\d+(?:\.\d+)?)%", r"\1\\%", final_text)
-
-                with open(writeup_file, "w") as fo:
-                    fo.write(final_text)
-
-                compile_latex(latex_folder, reflection_pdf)
+            if symbolic_facts:
+                patch_json = _extract_patch_from_response(reflection_response)
+                if patch_json is None:
+                    print("No valid JSON patch found in page-limit reflection step.")
+                else:
+                    ops = patch_json.get("ops")
+                    if not ops:
+                        print("No changes in reflection page step.")
+                    else:
+                        try:
+                            patch_result = apply_latex_patch_ops(current_latex, patch_json)
+                            final_text, fixup_report = fixup_latex_before_validation(
+                                patch_result.latex_text,
+                                scaffold_tex=current_latex,
+                            )
+                            if fixup_report.scaffold_preserved:
+                                print(
+                                    "[writeup] preserved canonical LaTeX scaffold after page-limit reflection patch"
+                                )
+                            if fixup_report.embedded_label_fixes:
+                                print(
+                                    "[writeup] normalized malformed includegraphics blocks after page-limit reflection patch: "
+                                    f"{fixup_report.embedded_label_fixes}"
+                                )
+                            final_text = _maybe_backanchor_numeric_literals(
+                                final_text,
+                                symbolic_facts=symbolic_facts,
+                                store=store,
+                                param_store=param_store,
+                            )
+                            validate_generated_writeup(
+                                final_text,
+                                symbolic_facts=symbolic_facts,
+                                store=store if symbolic_facts else None,
+                                param_store=param_store if symbolic_facts else None,
+                                artifact_manifest=manifest,
+                            )
+                            with open(writeup_file, "w") as fo:
+                                fo.write(final_text)
+                            compile_symbolic_latex_project(
+                                latex_folder=latex_folder,
+                                pdf_file=reflection_pdf,
+                                fact_store_path=fact_store_path,
+                                param_store_path=param_store_path,
+                                rendered_tex_artifact_path=osp.join(
+                                    latex_folder, "template.rendered.tex"
+                                ),
+                                used_facts_artifact_path=osp.join(
+                                    latex_folder, "used_facts.json"
+                                ),
+                            )
+                            save_validated_writeup(latex_folder, final_text)
+                            current_latex = final_text
+                            final_pdf_path = reflection_pdf
+                        except Exception as exc:
+                            with open(writeup_file, "w") as fo:
+                                fo.write(current_latex)
+                            print(
+                                "[writeup] discarded page-limit reflection patch and kept previous "
+                                f"validated draft: {exc}"
+                            )
             else:
-                print(f"No changes in reflection page step.")
+                reflection_code_match = re.search(
+                    r"```latex(.*?)```", reflection_response, re.DOTALL
+                )
+                if reflection_code_match:
+                    reflected_latex_code = reflection_code_match.group(1).strip()
+                    final_text, normalization = normalize_generated_latex_draft(
+                        reflected_latex_code,
+                        scaffold_tex=current_latex,
+                    )
+                    if final_text != current_latex:
+                        if normalization["scaffold_preserved"]:
+                            print(
+                                "[writeup] preserved canonical LaTeX scaffold after page-limit reflection"
+                            )
+                        if normalization["embedded_label_fixes"]:
+                            print(
+                                "[writeup] normalized malformed includegraphics blocks after page-limit reflection: "
+                                f"{normalization['embedded_label_fixes']}"
+                            )
+                        try:
+                            validate_generated_writeup(
+                                final_text,
+                                symbolic_facts=symbolic_facts,
+                                store=store if symbolic_facts else None,
+                                param_store=param_store if symbolic_facts else None,
+                                artifact_manifest=manifest,
+                            )
+                            with open(writeup_file, "w") as fo:
+                                fo.write(final_text)
+                            if symbolic_facts:
+                                compile_symbolic_latex_project(
+                                    latex_folder=latex_folder,
+                                    pdf_file=reflection_pdf,
+                                    fact_store_path=fact_store_path,
+                                    param_store_path=param_store_path,
+                                    rendered_tex_artifact_path=osp.join(
+                                        latex_folder, "template.rendered.tex"
+                                    ),
+                                    used_facts_artifact_path=osp.join(
+                                        latex_folder, "used_facts.json"
+                                    ),
+                                )
+                                save_validated_writeup(latex_folder, final_text)
+                            else:
+                                compile_latex(latex_folder, reflection_pdf)
+                            current_latex = final_text
+                            final_pdf_path = reflection_pdf
+                        except Exception as exc:
+                            with open(writeup_file, "w") as fo:
+                                fo.write(current_latex)
+                            print(
+                                "[writeup] discarded page-limit reflection revision and kept previous "
+                                f"validated draft: {exc}"
+                            )
+                    else:
+                        print(f"No changes in reflection page step.")
 
-        return osp.exists(reflection_pdf)
+        if symbolic_facts:
+            used_facts_path = osp.join(latex_folder, "used_facts.json")
+            if not osp.exists(used_facts_path):
+                raise RuntimeError(
+                    "Symbolic-facts writeup expected used_facts.json but it was not generated."
+                )
+            print("[claims] loading used_facts and symbolic_tex...")
+            with open(used_facts_path, "r", encoding="utf-8") as f:
+                used_facts = json.load(f)
+            with open(writeup_file, "r", encoding="utf-8") as f:
+                symbolic_tex = f.read()
+            manifest = ensure_artifact_manifest(
+                base_folder=base_folder,
+                store=store,
+                tex_path=writeup_file,
+            )
+            print("[claims] building claim context pack...")
+            claim_context_pack = build_claim_context_pack(
+                symbolic_tex=symbolic_tex,
+                used_facts=used_facts,
+                artifact_manifest_summary=artifact_manifest_summary(manifest),
+            )
+            save_context_pack(
+                osp.join(latex_folder, "claim_context_pack.json"),
+                claim_context_pack,
+            )
+            print("[claims] generating claim ledger...")
+            ledger = generate_claim_ledger(
+                symbolic_tex=symbolic_tex,
+                used_facts=used_facts,
+                client=big_client,
+                model=big_client_model,
+                artifact_manifest_summary=artifact_manifest_summary(manifest),
+                context_pack=claim_context_pack,
+                remediation_instructions=remediation_instructions,
+            )
+            used_keys = used_facts.get("used_keys")
+            used_keys = used_keys if isinstance(used_keys, list) else []
+            validate_claim_ledger(
+                ledger,
+                store=store,
+                used_keys=used_keys,
+                artifact_manifest=manifest,
+            )
+            claim_ledger_path = osp.join(latex_folder, "claim_ledger.json")
+            save_claim_ledger(claim_ledger_path, ledger)
+            print(f"[claims] wrote claim ledger: {claim_ledger_path}")
+            claim_trace_index = build_claim_trace_index(
+                ledger=ledger,
+                symbolic_tex=symbolic_tex,
+            )
+            validate_used_fact_traceability(
+                claim_trace_index,
+                used_keys=used_keys,
+            )
+            claim_trace_path = osp.join(latex_folder, "claim_trace_index.json")
+            save_claim_trace_index(claim_trace_path, claim_trace_index)
+            print(f"[claims] wrote claim trace index: {claim_trace_path}")
 
-    except Exception:
+            if env_bool("AI_SCIENTIST_OUTSIDER_AUDIT", True):
+                audit_model_name = env_str("AI_SCIENTIST_MODEL_OUTSIDER_AUDIT", small_model)
+                print(f"[audit] creating audit client: model={audit_model_name}")
+                audit_client, audit_model = create_client(audit_model_name)
+                print("[audit] building outsider audit inputs...")
+                audit_inputs = build_outsider_audit_inputs(
+                    symbolic_tex=symbolic_tex,
+                    used_facts=used_facts,
+                    store=store,
+                    claim_ledger=ledger,
+                    artifact_manifest_summary=artifact_manifest_summary(manifest),
+                )
+                save_context_pack(
+                    osp.join(latex_folder, "audit_context_pack.json"),
+                    build_outsider_audit_context_pack(audit_inputs),
+                )
+                print("[audit] generating outsider audit...")
+                audit = generate_outsider_audit(
+                    inputs=audit_inputs,
+                    client=audit_client,
+                    model=audit_model,
+                )
+                validate_outsider_audit(audit)
+                audit_path = osp.join(latex_folder, "outsider_audit.json")
+                save_outsider_audit(audit_path, audit)
+                print(f"[audit] wrote outsider audit: {audit_path}")
+
+        return osp.exists(final_pdf_path)
+
+    except Exception as exc:
+        trace_text = traceback.format_exc()
+        report = classify_remediation_failure(
+            phase="perform_icbinb_writeup",
+            exc=exc,
+            traceback_text=trace_text,
+        )
+        save_remediation_report(
+            osp.join(latex_folder, "remediation_failure.json"),
+            report,
+        )
         print("EXCEPTION in perform_writeup:")
-        print(traceback.format_exc())
+        print(trace_text)
+        print_remediation_report(report)
         return False
 
 

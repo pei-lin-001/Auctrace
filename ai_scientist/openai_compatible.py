@@ -19,6 +19,13 @@ OPENAI_COMPATIBLE_KEY_ENV_VARS = (
     "OPENAI_API_KEY",
 )
 OPENAI_VENDOR_PREFIX = "openai/"
+MINIMAX_VENDOR_PREFIX = "minimax/"
+MINIMAX_BASE_ENV_VARS = ("MINIMAX_BASE_URL",)
+MINIMAX_KEY_ENV_VARS = ("MINIMAX_API_KEY",)
+MINIMAX_REGION_ENV_VAR = "MINIMAX_REGION"
+MINIMAX_GLOBAL_BASE_URL = "https://api.minimax.io/v1"
+MINIMAX_CN_BASE_URL = "https://api.minimaxi.com/v1"
+MINIMAX_ROUTE = "minimax-openai-compatible"
 DEFAULT_CONTEXT_TOKENS = 128 * 1024
 CONTEXT_TOKENS_ENV_VAR = "AI_SCIENTIST_CONTEXT_TOKENS"
 DEFAULT_MAX_OUTPUT_TOKENS = 8 * 1024
@@ -137,6 +144,78 @@ def has_openai_compatible_base_url() -> bool:
     return openai_compatible_base_url() is not None
 
 
+def minimax_base_url() -> str:
+    configured = _first_env(*MINIMAX_BASE_ENV_VARS)
+    if configured is not None:
+        return normalize_base_url(configured)
+    region = os.environ.get(MINIMAX_REGION_ENV_VAR, "global").strip().lower()
+    if region == "cn":
+        return MINIMAX_CN_BASE_URL
+    return MINIMAX_GLOBAL_BASE_URL
+
+
+def minimax_api_key() -> str:
+    api_key = _first_env(*MINIMAX_KEY_ENV_VARS)
+    if api_key is None:
+        raise RuntimeError(
+            "MiniMax route requested, but no API key was found. "
+            f"Set one of: {', '.join(MINIMAX_KEY_ENV_VARS)}."
+        )
+    return api_key
+
+
+def has_minimax_api_key() -> bool:
+    return _first_env(*MINIMAX_KEY_ENV_VARS) is not None
+
+
+def _split_provider_prefix(model: str) -> tuple[str | None, str]:
+    normalized = normalize_openai_model_name(model)
+    if "/" not in normalized:
+        return None, normalized
+    provider, remainder = normalized.split("/", 1)
+    provider = provider.strip()
+    provider_lower = provider.lower()
+    if provider_lower in {
+        OPENAI_VENDOR_PREFIX.rstrip("/"),
+        MINIMAX_VENDOR_PREFIX.rstrip("/"),
+    }:
+        return provider_lower, remainder
+    return None, normalized
+
+
+def is_minimax_model(model: str) -> bool:
+    _, leaf = _split_provider_prefix(model)
+    return leaf.lower().startswith("minimax-")
+
+
+def is_minimax_route(route: str) -> bool:
+    return route == MINIMAX_ROUTE
+
+
+def is_minimax_client(client: openai.OpenAI) -> bool:
+    base_url = str(getattr(client, "base_url", "")).lower()
+    return "api.minimax.io" in base_url or "api.minimaxi.com" in base_url
+
+
+def apply_minimax_request_defaults(request_kwargs: dict) -> dict:
+    effective = dict(request_kwargs)
+    extra_body = dict(effective.get("extra_body") or {})
+    extra_body.setdefault("reasoning_split", True)
+    effective["extra_body"] = extra_body
+    return effective
+
+
+def response_message_to_history_dict(message: object) -> dict:
+    if hasattr(message, "model_dump"):
+        payload = message.model_dump(exclude_none=True)
+    elif isinstance(message, dict):
+        payload = {k: v for k, v in message.items() if v is not None}
+    else:
+        raise TypeError(f"Unsupported message type for history preservation: {type(message)!r}")
+    payload.setdefault("role", "assistant")
+    return payload
+
+
 def is_openai_reasoning_model(model: str) -> bool:
     leaf = model.strip().split("/")[-1]
     return leaf.startswith("o1") or leaf.startswith("o3")
@@ -148,12 +227,50 @@ def normalize_openai_model_name(model: str) -> str:
 
 def normalize_openai_model_for_route(model: str, route: str) -> str:
     normalized = normalize_openai_model_name(model)
-    if route == "openai" and normalized.startswith(OPENAI_VENDOR_PREFIX):
-        return normalized[len(OPENAI_VENDOR_PREFIX) :]
+    provider, leaf = _split_provider_prefix(normalized)
+    if route == MINIMAX_ROUTE:
+        leaf = leaf.strip()
+        if leaf.lower().startswith("minimax-"):
+            suffix = leaf[len("minimax-") :]
+            if suffix.lower().startswith("m"):
+                suffix = "M" + suffix[1:]
+            return "MiniMax-" + suffix
+        return leaf
+    if route == "openai" and provider == OPENAI_VENDOR_PREFIX.rstrip("/"):
+        return leaf
+    if route == "openai-compatible" and provider == OPENAI_VENDOR_PREFIX.rstrip("/"):
+        return leaf
     return normalized
 
 
 def create_openai_client(model: str, max_retries: int = 2) -> OpenAIClientSpec:
+    provider, _ = _split_provider_prefix(model)
+    if provider == MINIMAX_VENDOR_PREFIX.rstrip("/"):
+        client = openai.OpenAI(
+            api_key=minimax_api_key(),
+            base_url=minimax_base_url(),
+            max_retries=max_retries,
+            http_client=_build_http_client(),
+        )
+        return OpenAIClientSpec(
+            client=client,
+            model=normalize_openai_model_for_route(model, MINIMAX_ROUTE),
+            route=MINIMAX_ROUTE,
+        )
+
+    if is_minimax_model(model) and has_minimax_api_key():
+        client = openai.OpenAI(
+            api_key=minimax_api_key(),
+            base_url=minimax_base_url(),
+            max_retries=max_retries,
+            http_client=_build_http_client(),
+        )
+        return OpenAIClientSpec(
+            client=client,
+            model=normalize_openai_model_for_route(model, MINIMAX_ROUTE),
+            route=MINIMAX_ROUTE,
+        )
+
     compat_base_url = openai_compatible_base_url()
     if compat_base_url is not None:
         client = openai.OpenAI(

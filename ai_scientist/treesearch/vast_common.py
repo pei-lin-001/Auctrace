@@ -27,6 +27,32 @@ def cfg_value(cfg: Any, key: str, default: Any = None) -> Any:
     return getattr(cfg, key, default)
 
 
+def _as_int(value: Any, default: int) -> int:
+    if value is None:
+        return default
+    return int(value)
+
+
+def _as_float(value: Any, default: float) -> float:
+    if value is None:
+        return default
+    return float(value)
+
+
+def _as_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise ValueError(f"Cannot coerce Vast setting to bool: {value!r}")
+
+
 def normalize_vast_settings(exec_cfg: Any) -> dict[str, Any]:
     raw = cfg_value(exec_cfg, "vast", {}) or {}
     search = raw.get("search", {})
@@ -40,37 +66,47 @@ def normalize_vast_settings(exec_cfg: Any) -> dict[str, Any]:
         ),
         "existing_instance_id": raw.get("existing_instance_id"),
         "offer_id": raw.get("offer_id"),
-        "auto_destroy": raw.get("auto_destroy", True),
-        "readiness_timeout": raw.get("readiness_timeout", 900),
-        "setup_timeout": raw.get("setup_timeout", 1800),
-        "instance_poll_interval": raw.get("instance_poll_interval", 10),
-        "max_provision_attempts": raw.get("max_provision_attempts", 3),
-        "ssh_probe_retries": raw.get("ssh_probe_retries", 6),
-        "ssh_probe_retry_delay": raw.get("ssh_probe_retry_delay", 10),
-        "ssh_probe_timeout": raw.get("ssh_probe_timeout", 30),
-        "ssh_probe_connect_timeout": raw.get("ssh_probe_connect_timeout", 15),
+        "auto_destroy": _as_bool(raw.get("auto_destroy", True), True),
+        "readiness_timeout": _as_int(raw.get("readiness_timeout", 900), 900),
+        "setup_timeout": _as_int(raw.get("setup_timeout", 1800), 1800),
+        "instance_poll_interval": _as_int(raw.get("instance_poll_interval", 10), 10),
+        "max_provision_attempts": _as_int(raw.get("max_provision_attempts", 3), 3),
+        "ssh_probe_retries": _as_int(raw.get("ssh_probe_retries", 6), 6),
+        "ssh_probe_retry_delay": _as_int(raw.get("ssh_probe_retry_delay", 10), 10),
+        "ssh_probe_timeout": _as_int(raw.get("ssh_probe_timeout", 30), 30),
+        "ssh_probe_connect_timeout": _as_int(
+            raw.get("ssh_probe_connect_timeout", 15), 15
+        ),
         "remote_root": raw.get("remote_root", "/workspace/auctrace"),
         "image": raw.get("image", "pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel"),
-        "disk_gb": raw.get("disk_gb", 64),
+        "disk_gb": _as_int(raw.get("disk_gb", 64), 64),
         "runtype": raw.get("runtype", "ssh_direct"),
         "label_prefix": raw.get("label_prefix", "auctrace"),
-        "install_project_requirements": raw.get("install_project_requirements", True),
+        "install_project_requirements": _as_bool(
+            raw.get("install_project_requirements", True), True
+        ),
         "requirements_file": raw.get("requirements_file", "requirements.txt"),
-        "pip_install_timeout": raw.get("pip_install_timeout", 1800),
-        "auto_install_missing_packages": raw.get("auto_install_missing_packages", True),
-        "max_auto_dependency_installs": raw.get("max_auto_dependency_installs", 3),
+        "pip_install_timeout": _as_int(raw.get("pip_install_timeout", 1800), 1800),
+        "auto_install_missing_packages": _as_bool(
+            raw.get("auto_install_missing_packages", True), True
+        ),
+        "max_auto_dependency_installs": _as_int(
+            raw.get("max_auto_dependency_installs", 3), 3
+        ),
         "setup_commands": raw.get("setup_commands", []),
         "search": {
-            "limit": search.get("limit", 25),
+            "limit": _as_int(search.get("limit", 25), 25),
             "order": search.get("order", "dph_total"),
             "type": search.get("type", "on-demand"),
-            "verified": search.get("verified", True),
-            "rentable": search.get("rentable", True),
-            "rented": search.get("rented", False),
-            "num_gpus": search.get("num_gpus", 1),
-            "reliability_min": search.get("reliability_min", 0.95),
-            "inet_up_min": search.get("inet_up_min", 100),
-            "direct_port_count_min": search.get("direct_port_count_min", 1),
+            "verified": _as_bool(search.get("verified", True), True),
+            "rentable": _as_bool(search.get("rentable", True), True),
+            "rented": _as_bool(search.get("rented", False), False),
+            "num_gpus": _as_int(search.get("num_gpus", 1), 1),
+            "reliability_min": _as_float(search.get("reliability_min", 0.95), 0.95),
+            "inet_up_min": _as_float(search.get("inet_up_min", 100), 100.0),
+            "direct_port_count_min": _as_int(
+                search.get("direct_port_count_min", 1), 1
+            ),
         },
         "runtime": raw.get("runtime"),
     }

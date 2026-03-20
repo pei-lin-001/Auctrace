@@ -10,16 +10,23 @@ from rich import print
 from ai_scientist.openai_chat_completions import create_chat_completion_with_fallback
 from ai_scientist.openai_compatible import (
     OpenAIClientSpec,
+    apply_minimax_request_defaults,
     create_openai_client,
     is_openai_reasoning_model,
+    is_minimax_route,
 )
 
 logger = logging.getLogger("ai-scientist")
 OPENAI_SDK_MAX_RETRIES = 3
 
+
 def get_ai_client(model: str, max_retries=2) -> openai.OpenAI:
     spec = create_openai_client(model, max_retries=max_retries)
     return spec.client
+
+
+def _route_requires_user_message(route: str) -> bool:
+    return route == "openai-compatible" or is_minimax_route(route)
 
 
 def _normalize_messages_for_route(
@@ -27,7 +34,7 @@ def _normalize_messages_for_route(
     user_message: str | Any | None,
     route: str,
 ) -> tuple[str | None, str | Any | None]:
-    if route == "openai-compatible" and system_message and user_message is None:
+    if _route_requires_user_message(route) and system_message and user_message is None:
         return None, system_message
     return system_message, user_message
 
@@ -59,10 +66,18 @@ def _prepare_request(
         route,
     )
     messages = opt_messages_to_list(system_message, user_message)
+    for idx, message in enumerate(messages):
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError(
+                "Refusing to call chat.completions with empty message content: "
+                f"index={idx}, role={message.get('role')!r}"
+            )
 
     if func_spec is not None:
         request_kwargs["tools"] = [func_spec.as_openai_tool_dict]
         request_kwargs["tool_choice"] = func_spec.openai_tool_choice_dict
+        request_kwargs["parallel_tool_calls"] = False
 
     if is_openai_reasoning_model(model):
         if system_message is not None:
@@ -74,6 +89,9 @@ def _prepare_request(
             messages = opt_messages_to_list(None, merged_message)
         request_kwargs.pop("temperature", None)
         request_kwargs.pop("max_tokens", None)
+
+    if is_minimax_route(route):
+        request_kwargs = apply_minimax_request_defaults(request_kwargs)
 
     return messages, request_kwargs
 

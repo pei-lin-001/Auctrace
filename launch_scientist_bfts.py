@@ -28,8 +28,15 @@ from ai_scientist.perform_icbinb_writeup import (
 )
 from ai_scientist.perform_llm_review import perform_review, load_paper
 from ai_scientist.perform_vlm_review import perform_imgs_cap_ref_review
+from ai_scientist.reliable.remediation import (
+    load_remediation_report,
+    remediation_retry_banner,
+    should_retry_writeup,
+    should_reuse_symbolic_writeup_artifacts,
+)
+from ai_scientist.reliable.symbolic_postprocess import perform_symbolic_postprocess_retry
 from ai_scientist.utils.token_tracker import token_tracker
-from ai_scientist.env_utils import env_int, env_str, load_env
+from ai_scientist.env_utils import env_bool, env_int, env_str, load_env
 
 try:
     import torch
@@ -90,6 +97,15 @@ def parse_arguments():
         help="Number of writeup attempts to try",
     )
     parser.add_argument(
+        "--writeup-symbolic-facts",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("AI_SCIENTIST_WRITEUP_SYMBOLIC_FACTS", False),
+        help=(
+            "If enabled, use symbolic fact variables in LaTeX writeup: LLM must write \\fact{key} placeholders, "
+            "and a deterministic renderer fills numeric values before compilation."
+        ),
+    )
+    parser.add_argument(
         "--attempt_id",
         type=int,
         default=env_int("AI_SCIENTIST_ATTEMPT_ID", 0),
@@ -98,7 +114,7 @@ def parse_arguments():
     parser.add_argument(
         "--model_agg_plots",
         type=str,
-        default=env_str("AI_SCIENTIST_MODEL_AGG_PLOTS", "openai/gpt-oss-120b"),
+        default=env_str("AI_SCIENTIST_MODEL_AGG_PLOTS", "minimax/MiniMax-M2.7"),
         help="Model to use for plot aggregation",
     )
     parser.add_argument(
@@ -110,13 +126,13 @@ def parse_arguments():
     parser.add_argument(
         "--model_writeup",
         type=str,
-        default=env_str("AI_SCIENTIST_MODEL_WRITEUP", "openai/gpt-oss-120b"),
+        default=env_str("AI_SCIENTIST_MODEL_WRITEUP", "minimax/MiniMax-M2.7"),
         help="Model to use for writeup",
     )
     parser.add_argument(
         "--model_citation",
         type=str,
-        default=env_str("AI_SCIENTIST_MODEL_CITATION", "openai/gpt-oss-120b"),
+        default=env_str("AI_SCIENTIST_MODEL_CITATION", "minimax/MiniMax-M2.7"),
         help="Model to use for citation gathering",
     )
     parser.add_argument(
@@ -216,6 +232,12 @@ def describe_execution_backend(config_path="bfts_config.yaml"):
     except Exception:
         return f"Using GPUs: {get_available_gpus()}"
     backend = cfg.get("exec", {}).get("backend", "local")
+    if backend == "wsl_ssh":
+        wsl_cfg = cfg.get("exec", {}).get("wsl_ssh", {})
+        host = wsl_cfg.get("host", "unknown")
+        user = wsl_cfg.get("user", "unknown")
+        distro = wsl_cfg.get("wsl_distro", "WSL")
+        return f"Using WSL SSH execution backend ({user}@{host}, distro={distro})"
     if backend != "vast":
         return f"Using GPUs: {get_available_gpus()}"
     search_cfg = cfg.get("exec", {}).get("vast", {}).get("search", {})
@@ -225,7 +247,10 @@ def describe_execution_backend(config_path="bfts_config.yaml"):
 
 def find_pdf_path_for_review(idea_dir):
     pdf_files = [f for f in os.listdir(idea_dir) if f.endswith(".pdf")]
+    if not pdf_files:
+        return None
     reflection_pdfs = [f for f in pdf_files if "reflection" in f]
+    pdf_path = None
     if reflection_pdfs:
         # First check if there's a final version
         final_pdfs = [f for f in reflection_pdfs if "final" in f.lower()]
@@ -247,6 +272,8 @@ def find_pdf_path_for_review(idea_dir):
             else:
                 # Fall back to the first reflection PDF if no numbers found
                 pdf_path = osp.join(idea_dir, reflection_pdfs[0])
+    if pdf_path is None:
+        pdf_path = osp.join(idea_dir, pdf_files[0])
     return pdf_path
 
 
@@ -361,6 +388,8 @@ if __name__ == "__main__":
 
     if not args.skip_writeup:
         writeup_success = False
+        remediation_context = None
+        remediation_report_path = osp.join(idea_dir, "latex", "remediation_failure.json")
         citations_text = gather_citations(
             idea_dir,
             num_cite_rounds=args.num_cite_rounds,
@@ -368,13 +397,23 @@ if __name__ == "__main__":
         )
         for attempt in range(args.writeup_retries):
             print(f"Writeup attempt {attempt+1} of {args.writeup_retries}")
-            if args.writeup_type == "normal":
+            if args.writeup_symbolic_facts and should_reuse_symbolic_writeup_artifacts(
+                remediation_context
+            ):
+                writeup_success = perform_symbolic_postprocess_retry(
+                    base_folder=idea_dir,
+                    small_model=args.model_writeup_small,
+                    big_model=args.model_writeup,
+                    remediation_context=remediation_context,
+                )
+            elif args.writeup_type == "normal":
                 writeup_success = perform_writeup(
                     base_folder=idea_dir,
                     small_model=args.model_writeup_small,
                     big_model=args.model_writeup,
                     page_limit=8,
-                    citations_text=citations_text,
+                    symbolic_facts=args.writeup_symbolic_facts,
+                    remediation_context=remediation_context,
                 )
             else:
                 writeup_success = perform_icbinb_writeup(
@@ -383,9 +422,20 @@ if __name__ == "__main__":
                     big_model=args.model_writeup,
                     page_limit=4,
                     citations_text=citations_text,
+                    symbolic_facts=args.writeup_symbolic_facts,
+                    remediation_context=remediation_context,
                 )
             if writeup_success:
                 break
+            report = load_remediation_report(remediation_report_path)
+            if not should_retry_writeup(report):
+                print("[remediation] stopping writeup retries after non-retryable failure.")
+                break
+            if attempt + 1 >= args.writeup_retries:
+                print("[remediation] writeup retries exhausted after targeted repair attempts.")
+                break
+            print(remediation_retry_banner(report))
+            remediation_context = report
 
         if not writeup_success:
             print("Writeup process did not complete successfully after all retries.")
@@ -395,7 +445,7 @@ if __name__ == "__main__":
     if not args.skip_review and not args.skip_writeup:
         # Perform paper review if the paper exists
         pdf_path = find_pdf_path_for_review(idea_dir)
-        if os.path.exists(pdf_path):
+        if pdf_path and os.path.exists(pdf_path):
             print("Paper found at: ", pdf_path)
             paper_content = load_paper(pdf_path)
             client, client_model = create_client(args.model_review)
@@ -408,6 +458,8 @@ if __name__ == "__main__":
             with open(osp.join(idea_dir, "review_img_cap_ref.json"), "w") as f:
                 json.dump(review_img_cap_ref, f, indent=4)
             print("Paper review completed.")
+        else:
+            print("No paper PDF found; skipping review.")
 
     print("Start cleaning up processes")
     # Kill all mp and torch processes associated with this experiment

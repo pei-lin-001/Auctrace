@@ -7,13 +7,26 @@ import openai
 
 from ai_scientist.openai_chat_completions import create_chat_completion_with_fallback
 from ai_scientist.openai_compatible import (
+    apply_minimax_request_defaults,
     create_openai_client,
     is_openai_reasoning_model,
+    is_minimax_client,
     max_output_token_limit,
+    response_message_to_history_dict,
 )
 from ai_scientist.utils.token_tracker import track_token_usage
 
 MAX_NUM_TOKENS = max_output_token_limit()
+
+
+def _preserve_assistant_message(
+    client,
+    message,
+    content: str,
+) -> dict[str, Any]:
+    if is_minimax_client(client):
+        return response_message_to_history_dict(message)
+    return {"role": "assistant", "content": content}
 
 
 # Get N responses from a single message, used for ensembling.
@@ -39,7 +52,9 @@ def get_batch_responses_from_llm(
     if msg_history is None:
         msg_history = []
 
-    if is_openai_reasoning_model(model):
+    if is_openai_reasoning_model(model) or (
+        is_minimax_client(client) and n_responses > 1
+    ):
         content, new_msg_history = [], []
         for _ in range(n_responses):
             c, hist = get_response_from_llm(
@@ -93,6 +108,8 @@ def _batch_llm_call(client, model, temperature, system_message, prompt, n_respon
         "n": n_responses,
         "stop": None,
     }
+    if is_minimax_client(client):
+        request_kwargs = apply_minimax_request_defaults(request_kwargs)
     completion, _ = create_chat_completion_with_fallback(
         client,
         messages=messages,
@@ -126,6 +143,9 @@ def make_llm_call(client, model, temperature, system_message, prompt):
             "n": 1,
             "stop": None,
         }
+
+    if is_minimax_client(client):
+        request_kwargs = apply_minimax_request_defaults(request_kwargs)
 
     completion, _ = create_chat_completion_with_fallback(
         client,
@@ -167,7 +187,12 @@ def get_response_from_llm(
         prompt=new_msg_history,
     )
     content = response.choices[0].message.content
-    new_msg_history = new_msg_history + [{"role": "assistant", "content": content}]
+    assistant_message = _preserve_assistant_message(
+        client,
+        response.choices[0].message,
+        content,
+    )
+    new_msg_history = new_msg_history + [assistant_message]
 
     if print_debug:
         print()
