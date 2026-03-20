@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 import os.path as osp
+import re
 import shutil
 import subprocess
 import traceback
 import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 from ai_scientist.latex_sanitize import (
     ensure_tex_has_end_document,
@@ -33,6 +35,89 @@ class LatexCommandFailure(RuntimeError):
             f"--- stdout ---\n{self.stdout}\n"
             f"--- stderr ---\n{self.stderr}\n"
         )
+
+
+_UNDER_REVIEW_RE = re.compile(r"(?i)under\\s+review")
+
+
+def ensure_latex_template_assets(cwd: str) -> None:
+    """Ensure latex scaffold assets exist for pdflatex compilation.
+
+    Older runs (or partially-copied latex folders) may be missing the conference/workshop
+    style files. When that happens, LaTeX may silently fall back to a system-installed
+    style which can inject review headers like "Under review ...".
+    """
+
+    tex_path = Path(cwd) / "template.tex"
+    if not tex_path.exists():
+        return
+
+    try:
+        tex = tex_path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return
+
+    repo_root = Path(__file__).resolve().parents[2]
+    copied: list[str] = []
+
+    if "iclr2025" in tex:
+        src_dir = repo_root / "ai_scientist" / "blank_icbinb_latex"
+        copied.extend(
+            _sync_assets(
+                src_dir=src_dir,
+                dst_dir=Path(cwd),
+                names=(
+                    "iclr2025.sty",
+                    "iclr2025.bst",
+                    "iclr2025.bib",
+                    "natbib.sty",
+                    "fancyhdr.sty",
+                    "math_commands.tex",
+                ),
+            )
+        )
+
+    if "icml2025" in tex:
+        src_dir = repo_root / "ai_scientist" / "blank_icml_latex"
+        copied.extend(
+            _sync_assets(
+                src_dir=src_dir,
+                dst_dir=Path(cwd),
+                names=(
+                    "icml2025.sty",
+                    "icml2025.bst",
+                    "algorithm.sty",
+                    "algorithmic.sty",
+                ),
+            )
+        )
+
+    if copied:
+        copied_str = ", ".join(sorted(set(copied)))
+        print(f"[latex] synced template assets: {copied_str}")
+
+
+def _sync_assets(*, src_dir: Path, dst_dir: Path, names: tuple[str, ...]) -> list[str]:
+    copied: list[str] = []
+    for name in names:
+        src_path = src_dir / name
+        if not src_path.exists():
+            continue
+
+        dst_path = dst_dir / name
+        if dst_path.exists():
+            try:
+                contents = dst_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                contents = ""
+            if _UNDER_REVIEW_RE.search(contents):
+                shutil.copy2(src_path, dst_path)
+                copied.append(name)
+            continue
+
+        shutil.copy2(src_path, dst_path)
+        copied.append(name)
+    return copied
 
 
 def _sanitize_template_tex_for_pdflatex(cwd: str) -> None:
@@ -79,6 +164,7 @@ def _run(command: list[str], *, cwd: str, timeout: int) -> None:
 
 def compile_latex_project(cwd: str, pdf_file: str, *, timeout: int = 30) -> None:
     print("[latex] compiling (strict mode)")
+    ensure_latex_template_assets(cwd)
     _sanitize_template_tex_for_pdflatex(cwd)
 
     commands = [

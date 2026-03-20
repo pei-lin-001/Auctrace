@@ -8,6 +8,7 @@ import subprocess
 import traceback
 import unicodedata
 import uuid
+from typing import Any
 
 from ai_scientist.llm import (
     get_response_from_llm,
@@ -27,7 +28,17 @@ from ai_scientist.latex_sanitize import (
 )
 
 from ai_scientist.reliable.facts import facts_index_for_prompt
-from ai_scientist.reliable.latex_compile import compile_symbolic_latex_project
+from ai_scientist.reliable.latex_fixup import fixup_latex_before_validation
+from ai_scientist.reliable.latex_patch import apply_latex_patch_ops
+from ai_scientist.reliable.latex_scaffold import editable_suffix
+from ai_scientist.reliable.latex_compile import (
+    compile_symbolic_latex_project,
+    ensure_latex_template_assets,
+)
+from ai_scientist.reliable.params import (
+    ensure_param_store_for_run,
+    params_index_for_prompt,
+)
 from ai_scientist.reliable.writeup_inputs import ensure_symbolic_writeup_inputs
 from ai_scientist.reliable.writeup_validation import validate_generated_writeup
 from ai_scientist.reliable.artifact_manifest import (
@@ -43,9 +54,19 @@ from ai_scientist.reliable.remediation import (
     build_remediation_prompt_block,
     classify_remediation_failure,
     print_remediation_report,
+    remediation_retry_target,
     save_remediation_report,
 )
 from ai_scientist.reliable.errors import SymbolicLatexError
+from ai_scientist.reliable.writeup_retry import (
+    has_validated_writeup,
+    restore_validated_writeup,
+    save_validated_writeup,
+)
+from ai_scientist.reliable.writeup_rules import (
+    build_reflection_guard_block,
+    build_writeup_mode_instructions,
+)
 from ai_scientist.reliable.claim_ledger import (
     generate_claim_ledger,
     save_claim_ledger,
@@ -78,6 +99,46 @@ def remove_accents_and_clean(s):
     ascii_str = ascii_str.lower()
     # print("Cleaned: ", ascii_str)
     return ascii_str
+
+
+def _extract_patch_from_response(text: str) -> dict[str, Any] | None:
+    json_output = extract_json_between_markers(text)
+    if not isinstance(json_output, dict):
+        return None
+    return json_output
+
+
+def _maybe_backanchor_numeric_literals(
+    latex_text: str,
+    *,
+    symbolic_facts: bool,
+    store: Any,
+    param_store: Any,
+) -> str:
+    if not symbolic_facts:
+        return latex_text
+    if store is None or param_store is None:
+        return latex_text
+    if not env_bool("AI_SCIENTIST_NUMERIC_BACKANCHOR", False):
+        return latex_text
+
+    from ai_scientist.reliable.numeric_backanchor import backanchor_numeric_literals
+
+    try:
+        result = backanchor_numeric_literals(
+            latex_text,
+            store=store,
+            param_store=param_store,
+        )
+    except SymbolicLatexError as exc:
+        print(f"[writeup] numeric backanchor skipped: {exc}")
+        return latex_text
+    if result.replacements:
+        summary = ", ".join(
+            f"{k!r}x{v}" for k, v in sorted(result.replacements.items())
+        )
+        print(f"[writeup] auto-anchored numeric literals to placeholders: {summary}")
+    return result.latex_text
 
 
 def _sanitize_template_tex_for_pdflatex(cwd: str) -> None:
@@ -140,6 +201,7 @@ def _run_latex_command(command: list[str], cwd: str, timeout: int) -> None:
 
 def compile_latex(cwd, pdf_file, timeout=30):
     print("GENERATING LATEX")
+    ensure_latex_template_assets(cwd)
     _sanitize_template_tex_for_pdflatex(cwd)
 
     commands = [
@@ -319,7 +381,7 @@ This JSON will be automatically parsed, so ensure the format is precise."""
 
     try:
         text, msg_history = get_response_from_llm(
-            msg=citation_first_prompt_template.format(
+            prompt=citation_first_prompt_template.format(
                 current_round=current_round + 1,
                 total_rounds=total_rounds,
                 Idea=idea_text,
@@ -367,7 +429,7 @@ This JSON will be automatically parsed, so ensure the format is precise."""
 
     try:
         text, msg_history = get_response_from_llm(
-            msg=citation_second_prompt_template.format(
+            prompt=citation_second_prompt_template.format(
                 papers=papers_str,
                 current_round=current_round + 1,
                 total_rounds=total_rounds,
@@ -533,9 +595,14 @@ def perform_writeup(
     compile_attempt = 0
     base_pdf_file = osp.join(base_folder, f"{osp.basename(base_folder)}")
     latex_folder = osp.join(base_folder, "latex")
+    writeup_file = osp.join(latex_folder, "template.tex")
+    retry_target = remediation_retry_target(remediation_context)
+    reuse_existing_writeup = (
+        symbolic_facts and retry_target == "writeup" and has_validated_writeup(latex_folder)
+    )
 
     # Cleanup any previous latex folder and pdf
-    if osp.exists(latex_folder):
+    if not reuse_existing_writeup and osp.exists(latex_folder):
         shutil.rmtree(latex_folder)
     # if osp.exists(pdf_file):
     #     os.remove(pdf_file)
@@ -553,13 +620,17 @@ def perform_writeup(
                 with open(idea_md_path, "r") as f_idea:
                     idea_text = f_idea.read()
 
-        facts_instructions = ""
+        facts_instructions = build_writeup_mode_instructions(symbolic_facts)
         facts_index = ""
+        params_index = ""
+        param_store = None
         summaries_for_prompt = {}
         remediation_instructions = build_remediation_prompt_block(remediation_context)
         fact_store_path = osp.join(base_folder, "logs", "0-run", "fact_store.json")
+        param_store_path = osp.join(base_folder, "logs", "0-run", "param_store.json")
         if symbolic_facts:
             store, writeup_summary_symbolic = ensure_symbolic_writeup_inputs(base_folder)
+            param_store = ensure_param_store_for_run(base_folder)
             if not store.facts:
                 raise RuntimeError(
                     "Symbolic-facts writeup requested but FactStore is empty. "
@@ -567,19 +638,7 @@ def perform_writeup(
                 )
 
             facts_index = facts_index_for_prompt(store)
-            facts_instructions = (
-                "FACT VARIABLES MODE (symbolic writeup):\n"
-                "- Do NOT write any experimental numeric results directly (no 0.123, 12.3%, etc.).\n"
-                "- Whenever you need a number from experiments, insert \\\\fact{KEY} using a KEY from the index.\n"
-                "- Keep \\\\fact{...} placeholders in the LaTeX; a renderer will fill values before compilation.\n"
-                "- Use only exact keys listed in writeup_context_pack.facts_index.\n"
-                "- Never invent, rename, or change stage/dataset suffixes in a fact key.\n"
-                "- If no exact fact key exists for a sentence, rewrite that sentence qualitatively instead of fabricating a placeholder.\n"
-                "- The manuscript must still contain at least one valid \\\\fact{KEY} placeholder.\n"
-                "- Do NOT write approximate relative reductions or raw percentage ranges such as 'over 30\\\\%' or '15-25\\\\%'; anchor them to facts or rewrite qualitatively.\n"
-                "- When including figures, use only exact strings from writeup_context_pack.artifact_manifest_summary.includegraphics_targets.\n"
-                "- Do NOT reference stale experiment_results/*.png paths from older drafts or prior runs.\n"
-            )
+            params_index = params_index_for_prompt(param_store)
             summaries_for_prompt = {
                 "WRITEUP_SYMBOLIC_SUMMARY": writeup_summary_symbolic,
             }
@@ -605,11 +664,6 @@ def perform_writeup(
                         loaded_summaries[key] = {}
                 else:
                     loaded_summaries[key] = {}
-            facts_instructions = (
-                "NON-SYMBOLIC MODE:\n"
-                "- Do NOT use any \\\\fact{...} placeholders.\n"
-                "- Write numeric experimental results directly in the LaTeX.\n"
-            )
             summaries_for_prompt = loaded_summaries
 
         # Prepare a new fresh latex folder
@@ -617,6 +671,9 @@ def perform_writeup(
             shutil.copytree(
                 "ai_scientist/blank_icml_latex", latex_folder, dirs_exist_ok=True
             )
+
+        if reuse_existing_writeup and restore_validated_writeup(latex_folder, writeup_file):
+            print("[writeup] restored last validated symbolic draft for retry")
 
         writeup_file = osp.join(latex_folder, "template.tex")
         with open(writeup_file, "r") as f:
@@ -645,6 +702,7 @@ def perform_writeup(
                     latex_folder=latex_folder,
                     pdf_file=base_pdf_file + ".pdf",
                     fact_store_path=fact_store_path,
+                    param_store_path=param_store_path,
                     rendered_tex_artifact_path=osp.join(latex_folder, "template.rendered.tex"),
                     used_facts_artifact_path=osp.join(latex_folder, "used_facts.json"),
                 )
@@ -751,6 +809,7 @@ def perform_writeup(
             symbolic_facts=symbolic_facts,
             summaries_for_prompt=summaries_for_prompt,
             facts_index=facts_index,
+            params_index=params_index,
             artifact_manifest_summary=json.loads(manifest_summary_str),
             current_latex=writeup_text,
             plot_names=plot_names,
@@ -770,7 +829,7 @@ def perform_writeup(
         )
 
         response, msg_history = get_response_from_llm(
-            msg=combined_prompt,
+            prompt=combined_prompt,
             client=big_client,
             model=big_client_model,
             system_message=big_model_system_message,
@@ -783,14 +842,56 @@ def perform_writeup(
                 "LLM response did not contain a complete ```latex``` block."
             )
         updated_latex_code = latex_code_match.group(1).strip()
+        updated_latex_code, fixup_report = fixup_latex_before_validation(
+            updated_latex_code,
+            scaffold_tex=writeup_text,
+        )
+        if fixup_report.scaffold_preserved:
+            print("[writeup] preserved canonical LaTeX scaffold before validation")
+        if fixup_report.embedded_label_fixes:
+            print(
+                "[writeup] normalized malformed includegraphics blocks before validation: "
+                f"{fixup_report.embedded_label_fixes}"
+            )
+        if fixup_report.bibliography_fixed:
+            print("[writeup] normalized \\bibliography database to references before validation")
+        if fixup_report.end_document_appended:
+            print("[writeup] appended missing \\end{document} before validation")
+
+        updated_latex_code = _maybe_backanchor_numeric_literals(
+            updated_latex_code,
+            symbolic_facts=symbolic_facts,
+            store=store if symbolic_facts else None,
+            param_store=param_store,
+        )
+
         with open(writeup_file, "w") as f:
             f.write(updated_latex_code)
         validate_generated_writeup(
             updated_latex_code,
             symbolic_facts=symbolic_facts,
             store=store if symbolic_facts else None,
+            param_store=param_store if symbolic_facts else None,
             artifact_manifest=manifest,
         )
+
+        if n_writeup_reflections <= 0:
+            compile_pdf = base_pdf_file + f"_{compile_attempt}.pdf"
+            if symbolic_facts:
+                compile_symbolic_latex_project(
+                    latex_folder=latex_folder,
+                    pdf_file=compile_pdf,
+                    fact_store_path=fact_store_path,
+                    param_store_path=param_store_path,
+                    rendered_tex_artifact_path=osp.join(
+                        latex_folder, "template.rendered.tex"
+                    ),
+                    used_facts_artifact_path=osp.join(latex_folder, "used_facts.json"),
+                )
+                save_validated_writeup(latex_folder, updated_latex_code)
+            else:
+                compile_latex(latex_folder, compile_pdf)
+            compile_attempt += 1
 
         # Multiple reflection loops on the final LaTeX
         for i in range(n_writeup_reflections):
@@ -813,9 +914,11 @@ def perform_writeup(
                     latex_folder=latex_folder,
                     pdf_file=compile_pdf,
                     fact_store_path=fact_store_path,
+                    param_store_path=param_store_path,
                     rendered_tex_artifact_path=osp.join(latex_folder, "template.rendered.tex"),
                     used_facts_artifact_path=osp.join(latex_folder, "used_facts.json"),
                 )
+                save_validated_writeup(latex_folder, current_latex)
             else:
                 compile_latex(latex_folder, compile_pdf)
             compile_attempt += 1
@@ -837,25 +940,39 @@ def perform_writeup(
                 f"chktex {writeup_file} -q -n2 -n24 -n13 -n1"
             ).read()
 
-            fact_mode_rules = ""
+            reflection_guard_block = build_reflection_guard_block(
+                symbolic_facts=symbolic_facts,
+                remediation_instructions=remediation_instructions,
+            )
+            patch_contract = ""
+            current_editable = ""
             if symbolic_facts:
-                fact_mode_rules = (
-                    "\nFACT VARIABLES MODE REMINDER:\n"
-                    "- Keep all \\\\fact{...} placeholders (do not replace them with numbers).\n"
-                    "- Do not write any new numeric experimental results unless via \\\\fact{KEY}.\n"
-                    "- Use only exact keys from the fact index; never invent or rename a key.\n"
-                    "- If a needed exact key is missing, rewrite the sentence qualitatively.\n"
-                    "- Keep at least one valid \\\\fact{KEY} placeholder in the manuscript.\n"
-                    "- Do not write approximate relative reductions or raw percentage ranges such as 'over 30\\\\%' or '15-25\\\\%'.\n"
-                    "- Keep figure references aligned with artifact_manifest_summary.includegraphics_targets; remove stale experiment_results/*.png paths.\n"
+                patch_contract = (
+                    "PATCH MODE (symbolic-facts reflection):\n"
+                    "- Do NOT return full template.tex; do NOT touch the scaffold before \\end{filecontents}.\n"
+                    "- Return a JSON object with a single key: ops.\n"
+                    "- If no changes are needed, return: {\"ops\": []}\n"
+                    "- Allowed ops:\n"
+                    "  - replace_abstract: {\"op\":\"replace_abstract\",\"text\":\"...\"}\n"
+                    "  - replace_section: {\"op\":\"replace_section\",\"section_label\":\"sec:intro\",\"text\":\"...\"}\n"
+                    "    (or use section_title instead of section_label)\n"
+                    "  - replace_between: {\"op\":\"replace_between\",\"start\":\"...\",\"end\":\"...\",\"text\":\"...\"}\n"
+                    "  - insert_after: {\"op\":\"insert_after\",\"anchor\":\"...\",\"text\":\"...\"}\n"
+                    "  - delete_between: {\"op\":\"delete_between\",\"start\":\"...\",\"end\":\"...\"}\n"
+                    "- Hard rules:\n"
+                    "  - Do not remove any existing \\fact{...} or \\param{...} placeholders.\n"
+                    "  - Do not introduce numeric literals; keep results symbolic.\n"
+                    "  - Keep LaTeX compilable.\n"
+                    "Return format:\n"
+                    "RESPONSE:\n"
+                    "```json\n"
+                    "{\"ops\": [...]} \n"
+                    "```\n"
                 )
-            else:
-                fact_mode_rules = (
-                    "\nNON-SYMBOLIC MODE REMINDER:\n"
-                    "- Do NOT use any \\\\fact{...} placeholders. Output numeric results directly.\n"
-                )
+                current_editable = editable_suffix(current_latex)
 
-            reflection_prompt = f"""
+            reflection_prompt = (
+                f"""
 Now let's reflect and identify any issues (including but not limited to):
 1) Are there any LaTeX syntax errors or style violations we can fix? Refer to the chktex output below.
 2) Is the writing clear, and scientifically rigorous?
@@ -868,18 +985,22 @@ chktex results:
 {check_output}
 ```
 
-            {fact_mode_rules}
-            {remediation_instructions}
-
-            Please provide a revised complete LaTeX in triple backticks, or repeat the same if no changes are needed.
-            Return the entire file in full. This must be an acceptable complete LaTeX writeup.
-            Do not hallucinate any details!
-
-If you believe you are done, simply say: "I am done".
+{reflection_guard_block}
 """
+                + (
+                    f"\n{patch_contract}\n\nCURRENT EDITABLE LaTeX (after \\end{{filecontents}}):\n```latex\n{current_editable}\n```\n"
+                    if symbolic_facts
+                    else (
+                        "\nPlease provide a revised complete LaTeX in triple backticks, or repeat the same if no changes are needed.\n"
+                        "Return the entire file in full. This must be an acceptable complete LaTeX writeup.\n"
+                        "Do not hallucinate any details!\n"
+                    )
+                )
+                + '\nIf you believe you are done, simply say: "I am done".\n'
+            )
 
             reflection_response, msg_history = get_response_from_llm(
-                msg=reflection_prompt,
+                prompt=reflection_prompt,
                 client=big_client,
                 model=big_client_model,
                 system_message=big_model_system_message,
@@ -893,52 +1014,86 @@ If you believe you are done, simply say: "I am done".
                 )
                 break
 
-            reflection_code_match = re.search(
-                r"```latex(.*?)```", reflection_response, re.DOTALL
-            )
-            if reflection_code_match:
-                reflected_latex_code = reflection_code_match.group(1).strip()
-                if reflected_latex_code != current_latex:
-                    final_text = reflected_latex_code
-                    cleanup_map = {
-                        "</end": r"\\end",
-                        "</begin": r"\\begin",
-                        "’": "'",
-                    }
-                    for bad_str, repl_str in cleanup_map.items():
-                        final_text = final_text.replace(bad_str, repl_str)
-                    final_text = re.sub(r"(\d+(?:\.\d+)?)%", r"\1\\%", final_text)
-
-                    with open(writeup_file, "w") as fo:
-                        fo.write(final_text)
+            if symbolic_facts:
+                patch_json = _extract_patch_from_response(reflection_response)
+                if patch_json is None:
+                    print(f"No valid JSON patch found in reflection step {i+1}.")
+                    break
+                ops = patch_json.get("ops")
+                if not ops:
+                    print(f"No changes in reflection step {i+1}.")
+                    break
+                try:
+                    patch_result = apply_latex_patch_ops(current_latex, patch_json)
+                    final_text, _ = fixup_latex_before_validation(
+                        patch_result.latex_text,
+                        scaffold_tex=current_latex,
+                    )
+                    final_text = _maybe_backanchor_numeric_literals(
+                        final_text,
+                        symbolic_facts=symbolic_facts,
+                        store=store if symbolic_facts else None,
+                        param_store=param_store,
+                    )
                     validate_generated_writeup(
                         final_text,
                         symbolic_facts=symbolic_facts,
                         store=store if symbolic_facts else None,
+                        param_store=param_store if symbolic_facts else None,
                         artifact_manifest=manifest,
                     )
-
+                    with open(writeup_file, "w") as fo:
+                        fo.write(final_text)
                     compile_pdf = base_pdf_file + f"_{compile_attempt}.pdf"
-                    if symbolic_facts:
-                        compile_symbolic_latex_project(
-                            latex_folder=latex_folder,
-                            pdf_file=compile_pdf,
-                            fact_store_path=fact_store_path,
-                            rendered_tex_artifact_path=osp.join(
-                                latex_folder, "template.rendered.tex"
-                            ),
-                            used_facts_artifact_path=osp.join(latex_folder, "used_facts.json"),
-                        )
-                    else:
-                        compile_latex(latex_folder, compile_pdf)
+                    compile_symbolic_latex_project(
+                        latex_folder=latex_folder,
+                        pdf_file=compile_pdf,
+                        fact_store_path=fact_store_path,
+                        param_store_path=param_store_path,
+                        rendered_tex_artifact_path=osp.join(
+                            latex_folder, "template.rendered.tex"
+                        ),
+                        used_facts_artifact_path=osp.join(latex_folder, "used_facts.json"),
+                    )
+                    save_validated_writeup(latex_folder, final_text)
                     compile_attempt += 1
                     print(f"Compiled {base_pdf_file}_{compile_attempt}.pdf")
-                else:
-                    print(f"No changes in reflection step {i+1}.")
+                    current_latex = final_text
+                except Exception as exc:
+                    with open(writeup_file, "w") as fo:
+                        fo.write(current_latex)
+                    print(
+                        f"[writeup] discarded reflection {i+1} patch and kept previous validated draft: {exc}"
+                    )
                     break
             else:
-                print(f"No valid LaTeX code block found in reflection step {i+1}.")
-                break
+                reflection_code_match = re.search(
+                    r"```latex(.*?)```", reflection_response, re.DOTALL
+                )
+                if not reflection_code_match:
+                    print(f"No valid LaTeX code block found in reflection step {i+1}.")
+                    break
+                reflected_latex_code = reflection_code_match.group(1).strip()
+                if reflected_latex_code == current_latex:
+                    print(f"No changes in reflection step {i+1}.")
+                    break
+                final_text, _ = fixup_latex_before_validation(
+                    reflected_latex_code,
+                    scaffold_tex=current_latex,
+                )
+                with open(writeup_file, "w") as fo:
+                    fo.write(final_text)
+                validate_generated_writeup(
+                    final_text,
+                    symbolic_facts=symbolic_facts,
+                    store=store if symbolic_facts else None,
+                    param_store=param_store if symbolic_facts else None,
+                    artifact_manifest=manifest,
+                )
+                compile_pdf = base_pdf_file + f"_{compile_attempt}.pdf"
+                compile_latex(latex_folder, compile_pdf)
+                compile_attempt += 1
+                print(f"Compiled {base_pdf_file}_{compile_attempt}.pdf")
 
         final_pdf = base_pdf_file + f"_{compile_attempt-1}.pdf"
         if symbolic_facts:

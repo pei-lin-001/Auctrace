@@ -16,6 +16,9 @@ class ClaimLedgerError(ReliableWriteupError):
     pass
 
 
+CLAIM_LEDGER_SCHEMA_V1 = "auctrace.claim_ledger.v1"
+CLAIM_LEDGER_SCHEMA_V2 = "auctrace.claim_ledger.v2"
+
 _SECTION_RE = re.compile(r"\\section\{([^{}]+)\}")
 _INCLUDEGRAPHICS_RE = re.compile(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}")
 _CLAIM_TOKEN_WITH_DIGIT_RE = re.compile(r"[A-Za-z0-9_.:+/%-]*\d[A-Za-z0-9_.:+/%-]*")
@@ -185,8 +188,11 @@ def validate_claim_ledger(
     used_keys: Sequence[str],
     artifact_manifest: Mapping[str, Any] | None = None,
 ) -> None:
-    if str(ledger.get("schema", "")).strip() != "auctrace.claim_ledger.v2":
-        raise ClaimLedgerError("claim_ledger.schema must be 'auctrace.claim_ledger.v2'.")
+    schema = str(ledger.get("schema", "")).strip()
+    if schema not in {CLAIM_LEDGER_SCHEMA_V1, CLAIM_LEDGER_SCHEMA_V2}:
+        raise ClaimLedgerError(
+            f"claim_ledger.schema must be {CLAIM_LEDGER_SCHEMA_V1!r} or {CLAIM_LEDGER_SCHEMA_V2!r}."
+        )
     claims = ledger.get("claims")
     if not isinstance(claims, list) or not claims:
         raise ClaimLedgerError("claim_ledger.claims must be a non-empty list.")
@@ -218,16 +224,22 @@ def validate_claim_ledger(
 
         keys = _validate_supporting_facts(store, claim.get("supporting_facts") or [])
         all_supporting.update(keys)
-        _validate_claim_text_template(
-            claim.get("claim_text_template"),
-            idx=idx,
-            supporting_facts=keys,
-        )
-        audit_status = str(claim.get("audit_status", "")).strip()
-        if audit_status not in {"unknown", "pass", "fail"}:
-            raise ClaimLedgerError(
-                f"claim_ledger.claims[{idx}].audit_status must be unknown|pass|fail, got {audit_status!r}"
+        claim_text_template = claim.get("claim_text_template")
+        if schema == CLAIM_LEDGER_SCHEMA_V2 or claim_text_template is not None:
+            _validate_claim_text_template(
+                claim_text_template,
+                idx=idx,
+                supporting_facts=keys,
             )
+        audit_status = claim.get("audit_status")
+        if schema == CLAIM_LEDGER_SCHEMA_V2 and audit_status is None:
+            raise ClaimLedgerError(f"claim_ledger.claims[{idx}].audit_status is required.")
+        if audit_status is not None:
+            audit_status_str = str(audit_status).strip()
+            if audit_status_str not in {"unknown", "pass", "fail"}:
+                raise ClaimLedgerError(
+                    f"claim_ledger.claims[{idx}].audit_status must be unknown|pass|fail, got {audit_status_str!r}"
+                )
         _validate_supporting_artifacts(
             claim.get("supporting_artifacts"),
             idx=idx,
@@ -285,6 +297,7 @@ You are given:
 
 Your task:
 - Produce a JSON claim ledger.
+- claim_type must be exactly one of: numeric|comparative|qualitative|citation (do NOT output other values like "summary").
 - Each claim must reference one or more fact keys under supporting_facts.
 - claim_text must NOT contain standalone numeric result tokens.
 - Identifier-like names such as SST-2, GPT-4o, or Qwen2.5 are allowed.

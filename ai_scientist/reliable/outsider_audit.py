@@ -186,6 +186,7 @@ Output ONLY valid JSON inside a ```json block with this schema:
 Important rules:
 - Do NOT add experimental numeric values in the text unless they come from the provided used_fact_table.
 - Prefer citing fact_keys instead of repeating numbers.
+- evidence must include at least one non-empty anchor: claim_ids, fact_keys, or manuscript_quote (do not return an empty {{}}).
 - If there are no issues, return an empty issues list.
 
 Input bundle:
@@ -259,6 +260,31 @@ def validate_outsider_audit(audit: Mapping[str, Any]) -> None:
         evidence = item.get("evidence")
         if not isinstance(evidence, Mapping):
             raise OutsiderAuditError(f"outsider_audit.issues[{idx}].evidence must be an object.")
+        claim_ids = evidence.get("claim_ids")
+        fact_keys = evidence.get("fact_keys")
+        manuscript_quote = evidence.get("manuscript_quote")
+
+        def _nonempty_tokens(value: Any) -> list[str]:
+            if value is None:
+                return []
+            if isinstance(value, str):
+                text = value.strip()
+                return [text] if text else []
+            if isinstance(value, list):
+                tokens: list[str] = []
+                for entry in value:
+                    tokens.extend(_nonempty_tokens(entry))
+                return tokens
+            text = str(value).strip()
+            return [text] if text else []
+
+        has_anchor = bool(_nonempty_tokens(claim_ids) or _nonempty_tokens(fact_keys))
+        has_anchor = has_anchor or bool(_nonempty_tokens(manuscript_quote))
+        if not has_anchor:
+            raise OutsiderAuditError(
+                f"outsider_audit.issues[{idx}].evidence must include at least one non-empty anchor "
+                "(claim_ids, fact_keys, or manuscript_quote)."
+            )
 
         suggested_fix = str(item.get("suggested_fix", "")).strip()
         if not suggested_fix:

@@ -6,14 +6,24 @@ import os
 import pickle
 import shutil
 import traceback
+import tempfile
 from pathlib import Path
 from typing import Any
+
+if "MPLCONFIGDIR" not in os.environ:
+    try:
+        mpl_dir = Path(tempfile.gettempdir()) / "mplconfig"
+        mpl_dir.mkdir(parents=True, exist_ok=True)
+        os.environ["MPLCONFIGDIR"] = str(mpl_dir)
+    except Exception:
+        pass
 
 from ai_scientist.llm import create_client
 from ai_scientist.perform_icbinb_writeup import (
     gather_citations,
     perform_writeup as perform_icbinb_writeup,
 )
+from ai_scientist.perform_writeup import perform_writeup as perform_normal_writeup
 from ai_scientist.perform_llm_review import load_paper, perform_review
 from ai_scientist.perform_plotting import aggregate_plots
 from ai_scientist.perform_vlm_review import perform_imgs_cap_ref_review
@@ -54,6 +64,11 @@ def _parse_args() -> argparse.Namespace:
         help="Relative path from idea-dir to log dir (default: logs/0-run).",
     )
     parser.add_argument(
+        "--skip_summaries",
+        action="store_true",
+        help="Skip overall_summarize (useful for review-only runs).",
+    )
+    parser.add_argument(
         "--model_agg_plots",
         default=env_str("AI_SCIENTIST_MODEL_AGG_PLOTS", "minimax/MiniMax-M2.7"),
         help="Model for plot aggregation script generation.",
@@ -83,6 +98,12 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=env_int("AI_SCIENTIST_NUM_CITE_ROUNDS", 20),
         help="Number of citation gathering rounds.",
+    )
+    parser.add_argument(
+        "--writeup-type",
+        choices=("icbinb", "normal"),
+        default=env_str("AI_SCIENTIST_WRITEUP_TYPE", "icbinb"),
+        help="Which writeup implementation to run (default: icbinb).",
     )
     parser.add_argument(
         "--writeup-symbolic-facts",
@@ -153,6 +174,8 @@ def _copy_experiment_results(idea_dir: Path, log_dir: Path) -> Path:
 def _pick_review_pdf(idea_dir: Path) -> Path:
     base = idea_dir.name
     preferred = [
+        idea_dir / f"{base}_reflection_final_page_limit_noheader.pdf",
+        idea_dir / f"{base}_reflection_final_noheader.pdf",
         idea_dir / f"{base}_reflection_final_page_limit.pdf",
         idea_dir / f"{base}_reflection_final.pdf",
         idea_dir / f"{base}.pdf",
@@ -182,32 +205,32 @@ def main() -> None:
             raise FileNotFoundError(f"idea-dir does not exist: {idea_dir}")
 
         log_dir = (idea_dir / args.log_dir).resolve()
-        manager_path = log_dir / "manager.pkl"
-        if not manager_path.exists():
-            raise FileNotFoundError(f"manager.pkl not found: {manager_path}")
-
-        manager = _load_manager(manager_path)
-        cfg = getattr(manager, "cfg", None)
-        journals = getattr(manager, "journals", None)
-        if not isinstance(journals, dict) or not journals:
-            raise RuntimeError("Loaded manager.pkl but did not find a non-empty journals dict.")
-
         print(f"[postprocess] idea_dir={idea_dir}")
         print(f"[postprocess] log_dir={log_dir}")
-        print(f"[postprocess] journals={len(journals)}")
+        if not args.skip_summaries:
+            manager_path = log_dir / "manager.pkl"
+            if not manager_path.exists():
+                raise FileNotFoundError(f"manager.pkl not found: {manager_path}")
 
-        print("[postprocess] generating summaries...")
-        draft_summary, baseline_summary, research_summary, ablation_summary = overall_summarize(
-            journals.items(), cfg
-        )
-        save_overall_summaries(
-            base_folder=str(idea_dir),
-            log_dir=str(log_dir),
-            draft_summary=draft_summary,
-            baseline_summary=baseline_summary,
-            research_summary=research_summary,
-            ablation_summary=ablation_summary,
-        )
+            manager = _load_manager(manager_path)
+            cfg = getattr(manager, "cfg", None)
+            journals = getattr(manager, "journals", None)
+            if not isinstance(journals, dict) or not journals:
+                raise RuntimeError("Loaded manager.pkl but did not find a non-empty journals dict.")
+            print(f"[postprocess] journals={len(journals)}")
+
+            print("[postprocess] generating summaries...")
+            draft_summary, baseline_summary, research_summary, ablation_summary = overall_summarize(
+                journals.items(), cfg
+            )
+            save_overall_summaries(
+                base_folder=str(idea_dir),
+                log_dir=str(log_dir),
+                draft_summary=draft_summary,
+                baseline_summary=baseline_summary,
+                research_summary=research_summary,
+                ablation_summary=ablation_summary,
+            )
 
         copied_results_dir = None
         if not args.skip_plots:
@@ -223,13 +246,15 @@ def main() -> None:
                 shutil.rmtree(copied_results_dir)
 
         if not args.skip_writeup:
-            print("[postprocess] gathering citations...")
-            citations_text = gather_citations(
-                str(idea_dir),
-                num_cite_rounds=args.num_cite_rounds,
-                small_model=args.model_citation,
-            )
-            print("[postprocess] generating paper (icbinb writeup)...")
+            citations_text = None
+            if args.writeup_type == "icbinb":
+                print("[postprocess] gathering citations...")
+                citations_text = gather_citations(
+                    str(idea_dir),
+                    num_cite_rounds=args.num_cite_rounds,
+                    small_model=args.model_citation,
+                )
+            print(f"[postprocess] generating paper ({args.writeup_type} writeup)...")
             ok = False
             remediation_context = None
             remediation_report_path = idea_dir / "latex" / "remediation_failure.json"
@@ -247,15 +272,26 @@ def main() -> None:
                         remediation_context=remediation_context,
                     )
                 else:
-                    ok = perform_icbinb_writeup(
-                        base_folder=str(idea_dir),
-                        citations_text=citations_text,
-                        small_model=args.model_writeup_small,
-                        big_model=args.model_writeup,
-                        page_limit=4,
-                        symbolic_facts=args.writeup_symbolic_facts,
-                        remediation_context=remediation_context,
-                    )
+                    if args.writeup_type == "icbinb":
+                        ok = perform_icbinb_writeup(
+                            base_folder=str(idea_dir),
+                            citations_text=citations_text,
+                            small_model=args.model_writeup_small,
+                            big_model=args.model_writeup,
+                            page_limit=4,
+                            symbolic_facts=args.writeup_symbolic_facts,
+                            remediation_context=remediation_context,
+                        )
+                    else:
+                        ok = perform_normal_writeup(
+                            base_folder=str(idea_dir),
+                            num_cite_rounds=args.num_cite_rounds,
+                            small_model=args.model_writeup_small,
+                            big_model=args.model_writeup,
+                            page_limit=8,
+                            symbolic_facts=args.writeup_symbolic_facts,
+                            remediation_context=remediation_context,
+                        )
                 if ok:
                     break
                 report = load_remediation_report(str(remediation_report_path))
@@ -272,9 +308,11 @@ def main() -> None:
                 print(remediation_retry_banner(report))
                 remediation_context = report
             if not ok:
-                raise RuntimeError("perform_icbinb_writeup returned False (paper generation failed).")
+                raise RuntimeError(
+                    f"perform_writeup ({args.writeup_type}) returned False (paper generation failed)."
+                )
 
-        if not args.skip_review and not args.skip_writeup:
+        if not args.skip_review:
             pdf_path = _pick_review_pdf(idea_dir)
             print(f"[postprocess] reviewing paper: {pdf_path}")
             paper_content = load_paper(str(pdf_path))
@@ -291,7 +329,7 @@ def main() -> None:
         trace_text = traceback.format_exc()
         report: RemediationDecision
         is_writeup_abort = isinstance(exc, RuntimeError) and (
-            "perform_icbinb_writeup returned False" in str(exc)
+            "perform_writeup" in str(exc) and "returned False" in str(exc)
         )
         upstream_report = None
         if "idea_dir" in locals() and is_writeup_abort:

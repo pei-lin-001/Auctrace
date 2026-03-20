@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -18,14 +19,6 @@ from .vast_ssh import (
     run_setup_commands,
 )
 
-for vast_dir in (Path.home() / ".config" / "vastai", Path.home() / ".cache" / "vastai"):
-    vast_dir.mkdir(parents=True, exist_ok=True)
-
-try:
-    from vastai_sdk import VastAI
-except ImportError:  # pragma: no cover - dependency checked at runtime
-    VastAI = None
-
 INSTANCE_FAILURE_MARKERS = (
     "error pulling image",
     "failed to resolve reference",
@@ -35,11 +28,55 @@ INSTANCE_FAILURE_MARKERS = (
 load_project_env()
 
 
-def build_vast_client(api_key: str) -> VastAI:
-    if VastAI is None:
-        raise RuntimeError(
-            "Missing official Vast.ai SDK. Reinstall dependencies so `vastai-sdk` is available."
-        )
+_VAST_IMPORT_ERROR_MESSAGE = (
+    "Missing official Vast.ai SDK. Reinstall dependencies so `vastai-sdk` is available."
+)
+
+
+def _ensure_writable_xdg_dirs() -> None:
+    """Ensure XDG cache/config dirs are writable before importing Vast.ai SDK.
+
+    Vast.ai's SDK imports a CLI module that eagerly caches GPU names under XDG
+    cache (defaults to ~/.cache). In sandboxed environments, writing to HOME
+    may be forbidden even if the directory exists.
+    """
+
+    def _is_writable_dir(path: str) -> bool:
+        try:
+            candidate = Path(path)
+            candidate.mkdir(parents=True, exist_ok=True)
+            probe = candidate / ".write_probe"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
+            return True
+        except Exception:
+            return False
+
+    tmp_root = Path(tempfile.gettempdir())
+    fallback_cache = str(tmp_root / "xdg-cache")
+    fallback_config = str(tmp_root / "xdg-config")
+
+    cache_home = os.environ.get("XDG_CACHE_HOME")
+    if cache_home is None or not _is_writable_dir(cache_home):
+        os.environ["XDG_CACHE_HOME"] = fallback_cache
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    if config_home is None or not _is_writable_dir(config_home):
+        os.environ["XDG_CONFIG_HOME"] = fallback_config
+
+
+def _import_vast_client() -> Any:
+    """Import VastAI lazily to avoid import-time side effects when unused."""
+
+    _ensure_writable_xdg_dirs()
+    try:
+        from vastai_sdk import VastAI  # type: ignore
+    except ImportError as exc:  # pragma: no cover - dependency checked at runtime
+        raise RuntimeError(_VAST_IMPORT_ERROR_MESSAGE) from exc
+    return VastAI
+
+
+def build_vast_client(api_key: str) -> Any:
+    VastAI = _import_vast_client()
     return VastAI(api_key=api_key, raw=True, quiet=True)
 
 
@@ -144,7 +181,7 @@ def destroy_instance(api_key: str, instance_id: int) -> None:
     api_json_request("DELETE", f"/instances/{instance_id}/", api_key)
 
 
-def offer_candidates(client: VastAI, settings: dict[str, Any]) -> list[dict[str, Any]]:
+def offer_candidates(client: Any, settings: dict[str, Any]) -> list[dict[str, Any]]:
     if settings["offer_id"] is not None:
         return [{"offer_id": int(settings["offer_id"]), "machine_id": None}]
     query = search_query(settings)
@@ -176,7 +213,7 @@ def offer_candidates(client: VastAI, settings: dict[str, Any]) -> list[dict[str,
     return candidates
 
 
-def _attach_ssh_with_retry(client: VastAI, instance_id: int, public_key_text: str, max_attempts: int = 3) -> None:
+def _attach_ssh_with_retry(client: Any, instance_id: int, public_key_text: str, max_attempts: int = 3) -> None:
     for attempt in range(1, max_attempts + 1):
         client.attach_ssh(instance_id=instance_id, ssh_key=public_key_text)
         if attempt < max_attempts:
@@ -199,7 +236,7 @@ def _format_failure(
 
 
 def _runtime_from_instance(
-    client: VastAI,
+    client: Any,
     instance: dict[str, Any],
     instance_id: int,
     offer_id: int | None,
@@ -221,7 +258,7 @@ def _runtime_from_instance(
 
 def _provision_existing_instance(
     api_key: str,
-    client: VastAI,
+    client: Any,
     settings: dict[str, Any],
     public_key_text: str,
     private_key_path: str | None,

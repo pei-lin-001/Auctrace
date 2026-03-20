@@ -27,6 +27,7 @@ from .outsider_audit import (
     save_outsider_audit,
     validate_outsider_audit,
 )
+from .params import ensure_param_store_for_run
 from .remediation import (
     build_remediation_prompt_block,
     classify_remediation_failure,
@@ -51,6 +52,7 @@ def _ensure_existing_symbolic_compile(
     base_folder: str,
     latex_folder: str,
     fact_store_path: str,
+    param_store_path: str | None,
     used_facts_path: str,
     pdf_file: str,
 ) -> None:
@@ -60,6 +62,7 @@ def _ensure_existing_symbolic_compile(
         latex_folder=latex_folder,
         pdf_file=pdf_file,
         fact_store_path=fact_store_path,
+        param_store_path=param_store_path,
         rendered_tex_artifact_path=osp.join(latex_folder, "template.rendered.tex"),
         used_facts_artifact_path=used_facts_path,
     )
@@ -76,6 +79,7 @@ def _run_claim_and_audit_pipeline(
     remediation_context: Mapping[str, Any] | None,
 ) -> None:
     store, _ = ensure_symbolic_writeup_inputs(base_folder)
+    param_store = ensure_param_store_for_run(base_folder)
     with open(writeup_file, "r", encoding="utf-8") as f:
         symbolic_tex = f.read()
     manifest = ensure_artifact_manifest(
@@ -87,6 +91,7 @@ def _run_claim_and_audit_pipeline(
         symbolic_tex,
         symbolic_facts=True,
         store=store,
+        param_store=param_store,
         artifact_manifest=manifest,
     )
     with open(used_facts_path, "r", encoding="utf-8") as f:
@@ -147,12 +152,18 @@ def perform_symbolic_postprocess_retry(
 ) -> bool:
     latex_folder, writeup_file, used_facts_path = _load_existing_symbolic_paths(base_folder)
     fact_store_path = osp.join(base_folder, "logs", "0-run", "fact_store.json")
+    param_store_path = osp.join(base_folder, "logs", "0-run", "param_store.json")
+    try:
+        ensure_param_store_for_run(base_folder)
+    except Exception:
+        param_store_path = None
     pdf_file = osp.join(base_folder, f"{osp.basename(base_folder)}.pdf")
     try:
         _ensure_existing_symbolic_compile(
             base_folder=base_folder,
             latex_folder=latex_folder,
             fact_store_path=fact_store_path,
+            param_store_path=param_store_path,
             used_facts_path=used_facts_path,
             pdf_file=pdf_file,
         )

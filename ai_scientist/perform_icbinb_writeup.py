@@ -36,7 +36,10 @@ from ai_scientist.latex_sanitize import (
 )
 
 from ai_scientist.reliable.facts import facts_index_for_prompt
-from ai_scientist.reliable.latex_compile import compile_symbolic_latex_project
+from ai_scientist.reliable.latex_compile import (
+    compile_symbolic_latex_project,
+    ensure_latex_template_assets,
+)
 from ai_scientist.reliable.latex_scaffold import editable_suffix, normalize_generated_latex_draft
 from ai_scientist.reliable.latex_fixup import fixup_latex_before_validation
 from ai_scientist.reliable.latex_patch import apply_latex_patch_ops
@@ -240,6 +243,7 @@ def _run_latex_command(command: list[str], cwd: str, timeout: int) -> None:
 
 def compile_latex(cwd, pdf_file, timeout=30):
     print("GENERATING LATEX")
+    ensure_latex_template_assets(cwd)
     _sanitize_template_tex_for_pdflatex(cwd)
 
     commands = [

@@ -22,6 +22,7 @@ def build_writeup_mode_instructions(symbolic_facts: bool) -> str:
         "- The manuscript must still contain at least one valid \\\\fact{KEY} placeholder, and it should appear in the main text rather than only in comments.\n"
         "- Do not write approximate relative reductions or raw percentage ranges such as 'over 30\\\\%' or '15-25\\\\%'.\n"
         "- When including figures, use only exact strings from writeup_context_pack.artifact_manifest_summary.includegraphics_targets.\n"
+        "- Never output HTML tags such as <img ...>; always use \\includegraphics{...}.\n"
         "- Do NOT reference stale experiment_results/*.png paths from older drafts or prior runs.\n"
         "- Keep the LaTeX scaffold before \\\\end{filecontents} structurally unchanged: package imports, theorem declarations, \\\\graphicspath, and the references.bib scaffold are fixed.\n"
     )
