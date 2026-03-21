@@ -403,21 +403,29 @@ if __name__ == "__main__":
         idea_config_path,
         resume_checkpoint_path=args.resume_checkpoint,
     )
-    experiment_results_dir = osp.join(idea_dir, "logs/0-run/experiment_results")
-    if os.path.exists(experiment_results_dir):
+    experiment_results_src = osp.join(idea_dir, "logs/0-run/experiment_results")
+    experiment_results_staging = osp.join(idea_dir, "experiment_results")
+    if os.path.exists(experiment_results_src):
         shutil.copytree(
-            experiment_results_dir,
-            osp.join(idea_dir, "experiment_results"),
+            experiment_results_src,
+            experiment_results_staging,
             dirs_exist_ok=True,
         )
-
-    aggregate_plots(
-        base_folder=idea_dir,
-        model=args.model_agg_plots,
-        n_reflections=args.plot_reflections,
-    )
-
-    shutil.rmtree(osp.join(idea_dir, "experiment_results"))
+        try:
+            aggregate_plots(
+                base_folder=idea_dir,
+                model=args.model_agg_plots,
+                n_reflections=args.plot_reflections,
+            )
+        except Exception as exc:
+            print(f"[plotting] aggregate_plots failed: {type(exc).__name__}: {exc}")
+        finally:
+            if os.path.exists(experiment_results_staging):
+                shutil.rmtree(experiment_results_staging)
+    else:
+        print(
+            "[plotting] No experiment_results found under logs/0-run; skipping plot aggregation."
+        )
 
     save_token_tracker(idea_dir)
 
