@@ -64,7 +64,8 @@ def normalize_wsl_ssh_settings(exec_cfg: Any) -> dict[str, Any]:
     ssh_user = raw.get("user")
     remote_root_default = f"/home/{ssh_user}/auctrace" if ssh_user else "/home/auctrace"
     remote_root = raw.get("remote_root") or remote_root_default
-    windows_stage_dir_name = raw.get("windows_stage_dir_name", "auctrace-stage")
+    venv_path = raw.get("venv_path") or f"{remote_root}/.venv"
+    windows_stage_dir_name = raw.get("windows_stage_dir_name") or "auctrace-stage"
     return {
         "host": raw.get("host"),
         "host_candidates_env": raw.get(
@@ -84,7 +85,7 @@ def normalize_wsl_ssh_settings(exec_cfg: Any) -> dict[str, Any]:
         "wsl_distro": raw.get("wsl_distro", "Ubuntu"),
         "remote_root": remote_root,
         "runs_root": f"{remote_root}/runs",
-        "venv_path": raw.get("venv_path", f"{remote_root}/.venv"),
+        "venv_path": venv_path,
         "windows_stage_dir_name": windows_stage_dir_name,
         "install_project_requirements": _as_bool(
             raw.get("install_project_requirements", True), True
