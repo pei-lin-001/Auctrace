@@ -102,6 +102,8 @@ def _install_requirements_file(
         settings["pip_install_timeout"],
         settings["connect_timeout"],
         settings["wsl_distro"],
+        stream_output=True,
+        output_prefix="[wsl_ssh][pip] ",
     )
     if result.returncode != 0:
         raise RuntimeError(

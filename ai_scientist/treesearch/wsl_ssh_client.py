@@ -4,6 +4,8 @@ import base64
 import os
 import shlex
 import subprocess
+import sys
+import threading
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -84,9 +86,85 @@ def scp_base_args(auth: WslSshAuth, connect_timeout: int) -> list[str]:
     return args
 
 
-def run_command(argv: list[str], timeout: int, password: str | None) -> subprocess.CompletedProcess:
+def run_command(
+    argv: list[str],
+    timeout: int,
+    password: str | None,
+    *,
+    stream_output: bool = False,
+    output_prefix: str | None = None,
+) -> subprocess.CompletedProcess:
     if not password:
-        return subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
+        if not stream_output:
+            return subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
+
+        proc = subprocess.Popen(
+            argv,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=1,
+            universal_newlines=True,
+        )
+
+        stdout_chunks: list[str] = []
+        stderr_chunks: list[str] = []
+        prefix = output_prefix or ""
+
+        def _reader(
+            pipe,
+            chunks: list[str],
+            out_stream,
+        ) -> None:
+            try:
+                for line in iter(pipe.readline, ""):
+                    chunks.append(line)
+                    if prefix:
+                        out_stream.write(prefix)
+                    out_stream.write(line)
+                    out_stream.flush()
+            finally:
+                try:
+                    pipe.close()
+                except Exception:
+                    pass
+
+        threads: list[threading.Thread] = []
+        if proc.stdout is not None:
+            t = threading.Thread(
+                target=_reader,
+                args=(proc.stdout, stdout_chunks, sys.stdout),
+                daemon=True,
+            )
+            t.start()
+            threads.append(t)
+        if proc.stderr is not None:
+            t = threading.Thread(
+                target=_reader,
+                args=(proc.stderr, stderr_chunks, sys.stderr),
+                daemon=True,
+            )
+            t.start()
+            threads.append(t)
+
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            proc.kill()
+            raise TimeoutError(
+                f"Timed out waiting for command: {shlex.join(argv)}"
+            ) from exc
+        finally:
+            for t in threads:
+                t.join(timeout=1)
+
+        return subprocess.CompletedProcess(
+            argv,
+            int(proc.returncode or 0),
+            stdout="".join(stdout_chunks),
+            stderr="".join(stderr_chunks),
+        )
+
     child = pexpect.spawn(
         shlex.join(argv),
         encoding="utf-8",
@@ -94,12 +172,18 @@ def run_command(argv: list[str], timeout: int, password: str | None) -> subproce
         timeout=timeout,
     )
     chunks: list[str] = []
+    prefix = output_prefix or ""
     password_sent = False
     try:
         while True:
             index = child.expect([PASSWORD_PROMPT, pexpect.EOF, pexpect.TIMEOUT])
             if index == 0:
                 chunks.append(child.before)
+                if stream_output and child.before:
+                    if prefix:
+                        sys.stdout.write(prefix)
+                    sys.stdout.write(child.before)
+                    sys.stdout.flush()
                 if password_sent:
                     raise RuntimeError("SSH password prompt repeated after password submission")
                 child.sendline(password)
@@ -107,6 +191,11 @@ def run_command(argv: list[str], timeout: int, password: str | None) -> subproce
                 continue
             if index == 1:
                 chunks.append(child.before)
+                if stream_output and child.before:
+                    if prefix:
+                        sys.stdout.write(prefix)
+                    sys.stdout.write(child.before)
+                    sys.stdout.flush()
                 break
             raise TimeoutError(f"Timed out waiting for command: {shlex.join(argv)}")
     finally:
@@ -127,10 +216,19 @@ def run_windows_command(
     script: str,
     timeout: int,
     connect_timeout: int,
+    *,
+    stream_output: bool = False,
+    output_prefix: str | None = None,
 ) -> subprocess.CompletedProcess:
     command = build_powershell_command("$ProgressPreference='SilentlyContinue';" + script)
     argv = ssh_base_args(auth, connect_timeout) + [command]
-    return run_command(argv, timeout, auth.password)
+    return run_command(
+        argv,
+        timeout,
+        auth.password,
+        stream_output=stream_output,
+        output_prefix=output_prefix,
+    )
 
 
 def _quote_single(text: str) -> str:
@@ -143,6 +241,9 @@ def run_wsl_command(
     timeout: int,
     connect_timeout: int,
     distro_name: str | None,
+    *,
+    stream_output: bool = False,
+    output_prefix: str | None = None,
 ) -> subprocess.CompletedProcess:
     payload = base64.b64encode(bash_script.encode("utf-8")).decode("ascii")
     distro = f"-d '{_quote_single(distro_name)}' " if distro_name else ""
@@ -162,7 +263,14 @@ def run_wsl_command(
         "Remove-Item -Force $tmp -ErrorAction SilentlyContinue;"
         "exit $code"
     )
-    return run_windows_command(auth, script, timeout, connect_timeout)
+    return run_windows_command(
+        auth,
+        script,
+        timeout,
+        connect_timeout,
+        stream_output=stream_output,
+        output_prefix=output_prefix,
+    )
 
 
 def ensure_windows_stage_dir(

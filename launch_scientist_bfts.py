@@ -299,6 +299,19 @@ if __name__ == "__main__":
         disable_http_proxy()
 
     missing_model_vars: list[str] = []
+    # Models used during the core BFTS tree-search stages (defined in bfts_config.yaml via ${oc.env:...}).
+    # If any are missing, OmegaConf will raise an interpolation error later when we first access the value.
+    # Validate early to fail fast (before provisioning remote runtimes).
+    for env_var in (
+        "AI_SCIENTIST_MODEL_CODE",
+        "AI_SCIENTIST_MODEL_FEEDBACK",
+        "AI_SCIENTIST_MODEL_VLM_FEEDBACK",
+        "AI_SCIENTIST_MODEL_SUMMARY",
+        "AI_SCIENTIST_MODEL_SELECT_NODE",
+        "AI_SCIENTIST_MODEL_REPORT",
+    ):
+        if env_str_optional(env_var) is None:
+            missing_model_vars.append(f"{env_var} (required by bfts_config.yaml)")
     if args.model_agg_plots is None:
         missing_model_vars.append("AI_SCIENTIST_MODEL_AGG_PLOTS (or --model_agg_plots)")
     if not args.skip_writeup:
