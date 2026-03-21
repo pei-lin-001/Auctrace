@@ -1185,6 +1185,10 @@ class ParallelAgent:
             ],
         }
 
+        print(
+            "[llm] defining evaluation metric "
+            f"(model={self.cfg.agent.code.model}, temp={self.cfg.agent.code.temp})..."
+        )
         response = query(
             system_message=prompt,
             user_message=None,
