@@ -353,6 +353,33 @@ def compute_ceb(
     artifact_manifest: Mapping[str, Any] | None,
     claim_trace_index: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
+    strictness = {
+        "citation": 0,
+        "qualitative": 1,
+        "numeric": 2,
+        "comparative": 2,
+    }
+
+    def _infer_claim_type(claim: Mapping[str, Any]) -> str:
+        template = str(claim.get("claim_text_template") or "")
+        text = str(claim.get("claim_text") or template)
+
+        numeric_signal = bool(_FACT_MACRO_RE.search(template)) or bool(
+            _DECIMAL_RE.search(text)
+            or _SCIENTIFIC_RE.search(text)
+            or _PERCENT_RE.search(text)
+        )
+        cite_signal = bool(_CITE_COMMAND_RE.search(template)) or bool(
+            _CITE_COMMAND_RE.search(text)
+        )
+        if numeric_signal and contains_comparative_language(text):
+            return "comparative"
+        if numeric_signal:
+            return "numeric"
+        if cite_signal:
+            return "citation"
+        return "qualitative"
+
     claims = claim_ledger.get("claims", []) or []
     total_claims = len(claims)
     if total_claims == 0:
@@ -384,11 +411,29 @@ def compute_ceb(
 
     by_type = defaultdict(lambda: {"total": 0, "bound": 0})
     failures: list[dict[str, Any]] = []
+    type_mismatches: list[dict[str, Any]] = []
 
     for c in claims:
         claim_id = c.get("claim_id")
-        claim_type = str(c.get("claim_type") or "other")
-        by_type[claim_type]["total"] += 1
+        declared_type = str(c.get("claim_type") or "other")
+        inferred_type = _infer_claim_type(c)
+        eval_type = inferred_type
+        if declared_type in strictness and strictness.get(declared_type, 0) >= strictness.get(
+            inferred_type, 0
+        ):
+            eval_type = declared_type
+        if eval_type != declared_type:
+            type_mismatches.append(
+                {
+                    "claim_id": claim_id,
+                    "declared_type": declared_type,
+                    "eval_type": eval_type,
+                    "inferred_type": inferred_type,
+                    "claim_text": (c.get("claim_text") or c.get("claim_text_template") or "")[:200],
+                }
+            )
+
+        by_type[eval_type]["total"] += 1
 
         location = c.get("location_hints") or {}
         section = str(location.get("section") or "")
@@ -408,7 +453,7 @@ def compute_ceb(
 
         bound = False
         reasons: list[str] = []
-        if claim_type in {"numeric", "comparative"}:
+        if eval_type in {"numeric", "comparative"}:
             if not facts_ok:
                 reasons.append("missing_or_invalid_supporting_facts")
             if not artifacts_ok:
@@ -418,7 +463,7 @@ def compute_ceb(
             if not anchor_ok:
                 reasons.append("missing_or_unknown_latex_anchor")
             bound = facts_ok and artifacts_ok and section_ok and anchor_ok
-        elif claim_type == "qualitative":
+        elif eval_type == "qualitative":
             if not artifacts_ok:
                 reasons.append("missing_or_invalid_supporting_artifacts")
             if not section_ok:
@@ -426,7 +471,7 @@ def compute_ceb(
             if not anchor_ok:
                 reasons.append("missing_or_unknown_latex_anchor")
             bound = artifacts_ok and section_ok and anchor_ok
-        elif claim_type == "citation":
+        elif eval_type == "citation":
             if not section_ok:
                 reasons.append("missing_or_unknown_section")
             if not anchor_ok:
@@ -442,12 +487,12 @@ def compute_ceb(
             bound = artifacts_ok and section_ok and anchor_ok
 
         if bound:
-            by_type[claim_type]["bound"] += 1
+            by_type[eval_type]["bound"] += 1
         else:
             failures.append(
                 {
                     "claim_id": claim_id,
-                    "claim_type": claim_type,
+                    "claim_type": eval_type,
                     "reasons": reasons,
                     "claim_text": (c.get("claim_text") or "")[:200],
                 }
@@ -471,6 +516,8 @@ def compute_ceb(
         "total_claims": total_claims,
         "bound_claims": bound_claims,
         "by_type": dict(by_type_out),
+        "type_mismatch_count": len(type_mismatches),
+        "type_mismatch_samples": type_mismatches[:20],
         "failure_samples": failures[:20],
     }
 
