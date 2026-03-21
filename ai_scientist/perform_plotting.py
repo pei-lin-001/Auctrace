@@ -134,8 +134,13 @@ def run_aggregator_script(
 
 
 def aggregate_plots(
-    base_folder: str, model: str = "deepseek-chat", n_reflections: int = 5
+    base_folder: str, model: str | None = None, n_reflections: int = 5
 ) -> None:
+    if model is None or not str(model).strip():
+        raise RuntimeError(
+            "Missing plot aggregation model. "
+            "Set AI_SCIENTIST_MODEL_AGG_PLOTS in your .env file (or pass --model)."
+        )
     filename = "auto_plot_aggregator.py"
     aggregator_script_path = os.path.join(base_folder, filename)
     figures_dir = os.path.join(base_folder, "figures")
@@ -255,7 +260,7 @@ If you believe you are done, simply say: "I am done". Otherwise, please provide 
 
 
 def main():
-    from ai_scientist.env_utils import env_int, env_str, load_env
+    from ai_scientist.env_utils import env_int, env_str_optional, load_env
 
     load_env()
     parser = argparse.ArgumentParser(
@@ -268,8 +273,8 @@ def main():
     )
     parser.add_argument(
         "--model",
-        default=env_str("AI_SCIENTIST_MODEL_AGG_PLOTS", "deepseek-chat"),
-        help="LLM model to use (default: deepseek-chat).",
+        default=env_str_optional("AI_SCIENTIST_MODEL_AGG_PLOTS"),
+        help="LLM model to use.",
     )
     parser.add_argument(
         "--reflections",
@@ -278,6 +283,11 @@ def main():
         help="Number of reflection steps to attempt (default: 5).",
     )
     args = parser.parse_args()
+    if args.model is None:
+        raise RuntimeError(
+            "Missing plot aggregation model. "
+            "Set AI_SCIENTIST_MODEL_AGG_PLOTS in your .env file (or pass --model)."
+        )
     aggregate_plots(
         base_folder=args.folder, model=args.model, n_reflections=args.reflections
     )

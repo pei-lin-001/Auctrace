@@ -266,7 +266,7 @@ def generate_temp_free_idea(
 
 
 if __name__ == "__main__":
-    from ai_scientist.env_utils import env_int, env_str, load_env
+    from ai_scientist.env_utils import env_int, env_str, env_str_optional, load_env
 
     load_env()
     parser = argparse.ArgumentParser(
@@ -275,7 +275,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default=env_str("AI_SCIENTIST_MODEL_IDEATION", "deepseek-chat"),
+        default=env_str_optional("AI_SCIENTIST_MODEL_IDEATION"),
         help="Model to use for AI Scientist. Supports direct providers and arbitrary OpenAI-compatible model names.",
     )
     parser.add_argument(
@@ -300,6 +300,12 @@ if __name__ == "__main__":
         help="Number of reflection rounds per proposal.",
     )
     args = parser.parse_args()
+
+    if args.model is None:
+        raise RuntimeError(
+            "Missing required model configuration for ideation. "
+            "Set AI_SCIENTIST_MODEL_IDEATION in your .env file (or pass --model)."
+        )
 
     # Create the LLM client
     client, client_model = create_client(args.model)

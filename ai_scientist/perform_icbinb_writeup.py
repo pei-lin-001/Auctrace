@@ -93,7 +93,7 @@ from ai_scientist.reliable.outsider_audit import (
     save_outsider_audit,
     validate_outsider_audit,
 )
-from ai_scientist.env_utils import env_bool, env_str
+from ai_scientist.env_utils import env_bool, env_str, env_str_optional
 
 
 def remove_accents_and_clean(s):
@@ -911,7 +911,11 @@ def filter_experiment_summaries(exp_summaries, step_name):
     return filtered_summaries
 
 
-def gather_citations(base_folder, num_cite_rounds=20, small_model="deepseek-chat"):
+def gather_citations(
+    base_folder,
+    num_cite_rounds=20,
+    small_model: str | None = None,
+):
     """
     Gather citations for a paper, with ability to resume from previous progress.
 
@@ -924,6 +928,14 @@ def gather_citations(base_folder, num_cite_rounds=20, small_model="deepseek-chat
     Returns:
         str: The gathered citations text, or None if failed
     """
+
+    if small_model is None:
+        small_model = env_str_optional("AI_SCIENTIST_MODEL_CITATION")
+    if small_model is None:
+        raise RuntimeError(
+            "Missing citation model configuration. Set AI_SCIENTIST_MODEL_CITATION in your .env file "
+            "(or pass small_model)."
+        )
 
     # Paths for storing progress
     citations_cache_path = osp.join(base_folder, "cached_citations.bib")
@@ -1079,13 +1091,22 @@ def perform_writeup(
     citations_text=None,
     no_writing=False,
     num_cite_rounds=20,
-    small_model="deepseek-chat",
-    big_model="deepseek-chat",
+    small_model: str | None = None,
+    big_model: str | None = None,
     n_writeup_reflections=3,
     page_limit=4,
     symbolic_facts: bool = False,
     remediation_context: dict[str, object] | None = None,
 ):
+    if small_model is None:
+        small_model = env_str_optional("AI_SCIENTIST_MODEL_WRITEUP_SMALL")
+    if big_model is None:
+        big_model = env_str_optional("AI_SCIENTIST_MODEL_WRITEUP")
+    if small_model is None or big_model is None:
+        raise RuntimeError(
+            "Missing writeup model configuration. Set these in your .env file "
+            "(or pass explicit arguments): AI_SCIENTIST_MODEL_WRITEUP_SMALL, AI_SCIENTIST_MODEL_WRITEUP."
+        )
     pdf_file = osp.join(base_folder, f"{osp.basename(base_folder)}.pdf")
     latex_folder = osp.join(base_folder, "latex")
     writeup_file = osp.join(latex_folder, "template.tex")
@@ -2071,7 +2092,7 @@ USE MINIMAL EDITS TO OPTIMIZE THE PAGE LIMIT USAGE.
 
 
 if __name__ == "__main__":
-    from ai_scientist.env_utils import env_int, env_str, load_env
+    from ai_scientist.env_utils import env_int, env_str_optional, load_env
 
     load_env()
     parser = argparse.ArgumentParser(description="Perform writeup for a project")
@@ -2085,13 +2106,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default=env_str("AI_SCIENTIST_MODEL_CITATION", "deepseek-chat"),
+        default=env_str_optional("AI_SCIENTIST_MODEL_CITATION"),
         help="Model to use for citation collection (small model). Supports arbitrary OpenAI-compatible model names.",
     )
     parser.add_argument(
         "--big-model",
         type=str,
-        default=env_str("AI_SCIENTIST_MODEL_WRITEUP", "deepseek-chat"),
+        default=env_str_optional("AI_SCIENTIST_MODEL_WRITEUP"),
         help="Model to use for final writeup (big model). Supports arbitrary OpenAI-compatible model names.",
     )
     parser.add_argument(
@@ -2107,6 +2128,11 @@ if __name__ == "__main__":
         help="Target page limit for the main paper (excluding references).",
     )
     args = parser.parse_args()
+    if args.model is None or args.big_model is None:
+        raise RuntimeError(
+            "Missing writeup model configuration. Set AI_SCIENTIST_MODEL_CITATION and "
+            "AI_SCIENTIST_MODEL_WRITEUP in your .env file (or pass --model/--big-model)."
+        )
 
     try:
         success = perform_writeup(

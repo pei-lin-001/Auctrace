@@ -13,6 +13,8 @@ from .utils.metric import MetricValue, WorstMetricValue
 from .utils.response import trim_long_string
 from .backend import FunctionSpec, query
 
+from ai_scientist.env_utils import env_str_optional
+
 from rich import print
 
 import logging
@@ -460,7 +462,12 @@ class Journal:
 
         try:
             if cfg is None or cfg.agent.get("select_node", None) is None:
-                model = "deepseek-chat"
+                model = env_str_optional("AI_SCIENTIST_MODEL_SELECT_NODE")
+                if model is None:
+                    raise RuntimeError(
+                        "Missing model configuration for node selection. "
+                        "Set AI_SCIENTIST_MODEL_SELECT_NODE in your .env file."
+                    )
                 temperature = 0.3
                 fallback_model = None
             else:
@@ -528,6 +535,12 @@ class Journal:
                 failure_info += f"Code: {node.code}\n"
             prompt["Failed Experiments"] += failure_info
 
+        requested_model = model_kwargs.get("model") or env_str_optional("AI_SCIENTIST_MODEL_SUMMARY")
+        if requested_model is None:
+            raise RuntimeError(
+                "Missing summary model configuration. "
+                "Set AI_SCIENTIST_MODEL_SUMMARY in your .env file."
+            )
         summary = query(
             system_message=prompt,
             user_message=(
@@ -536,7 +549,7 @@ class Journal:
                 "2. Common failure patterns and pitfalls to avoid\n"
                 "3. Specific recommendations for future experiments based on both successes and failures"
             ),
-            model=model_kwargs.get("model", "deepseek-chat"),
+            model=requested_model,
             temperature=model_kwargs.get("temp", 0.3),
             fallback_model=model_kwargs.get("fallback_model"),
         )
@@ -597,10 +610,20 @@ class Journal:
             ),
         }
 
+        requested_model = (
+            cfg.agent.summary.model
+            if cfg.agent.get("summary", None)
+            else env_str_optional("AI_SCIENTIST_MODEL_SUMMARY")
+        )
+        if requested_model is None:
+            raise RuntimeError(
+                "Missing summary model configuration. "
+                "Set AI_SCIENTIST_MODEL_SUMMARY in your .env file."
+            )
         stage_summary = query(
             system_message=summary_prompt,
             user_message="Generate a comprehensive summary of the experimental findings in this stage",
-            model=cfg.agent.summary.model if cfg.agent.get("summary", None) else "deepseek-chat",
+            model=requested_model,
             temperature=cfg.agent.summary.temp if cfg.agent.get("summary", None) else 0.3,
             fallback_model=(
                 cfg.agent.summary.fallback_model

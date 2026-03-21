@@ -13,6 +13,7 @@ from ai_scientist.llm import (
     extract_json_between_markers,
     get_response_from_llm,
 )
+from ai_scientist.env_utils import env_str_optional
 
 
 report_summarizer_sys_msg = """You are an expert machine learning researcher.
@@ -338,11 +339,15 @@ def _summarize_ablation(stage_name: str, journal: Journal) -> list[dict[str, Any
 
 
 def _summarize_draft(stage_name: str, journal: Journal, cfg: Any) -> dict[str, Any]:
-    requested_model = (
-        cfg.agent.summary.get("model", "")
-        if cfg is not None and cfg.agent.get("summary", None) is not None
-        else "MiniMax-M2.5"
-    )
+    requested_model = None
+    if cfg is not None and cfg.agent.get("summary", None) is not None:
+        requested_model = str(cfg.agent.summary.get("model", "") or "").strip() or None
+    requested_model = requested_model or env_str_optional("AI_SCIENTIST_MODEL_SUMMARY")
+    if requested_model is None:
+        raise RuntimeError(
+            "Missing summary model configuration. "
+            "Set AI_SCIENTIST_MODEL_SUMMARY in your .env file."
+        )
     client, model = create_client(requested_model)
     return get_stage_summary(journal, stage_name, model, client)
 

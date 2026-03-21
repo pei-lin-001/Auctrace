@@ -36,7 +36,7 @@ from ai_scientist.reliable.remediation import (
 )
 from ai_scientist.reliable.symbolic_postprocess import perform_symbolic_postprocess_retry
 from ai_scientist.utils.token_tracker import token_tracker
-from ai_scientist.env_utils import env_bool, env_int, env_str, load_env
+from ai_scientist.env_utils import env_bool, env_int, env_str, env_str_optional, load_env
 
 try:
     import torch
@@ -114,7 +114,7 @@ def parse_arguments():
     parser.add_argument(
         "--model_agg_plots",
         type=str,
-        default=env_str("AI_SCIENTIST_MODEL_AGG_PLOTS", "minimax/MiniMax-M2.7"),
+        default=env_str_optional("AI_SCIENTIST_MODEL_AGG_PLOTS"),
         help="Model to use for plot aggregation",
     )
     parser.add_argument(
@@ -126,13 +126,13 @@ def parse_arguments():
     parser.add_argument(
         "--model_writeup",
         type=str,
-        default=env_str("AI_SCIENTIST_MODEL_WRITEUP", "minimax/MiniMax-M2.7"),
+        default=env_str_optional("AI_SCIENTIST_MODEL_WRITEUP"),
         help="Model to use for writeup",
     )
     parser.add_argument(
         "--model_citation",
         type=str,
-        default=env_str("AI_SCIENTIST_MODEL_CITATION", "minimax/MiniMax-M2.7"),
+        default=env_str_optional("AI_SCIENTIST_MODEL_CITATION"),
         help="Model to use for citation gathering",
     )
     parser.add_argument(
@@ -144,13 +144,13 @@ def parse_arguments():
     parser.add_argument(
         "--model_writeup_small",
         type=str,
-        default=env_str("AI_SCIENTIST_MODEL_WRITEUP_SMALL", "gpt-5.4"),
+        default=env_str_optional("AI_SCIENTIST_MODEL_WRITEUP_SMALL"),
         help="Smaller model to use for writeup",
     )
     parser.add_argument(
         "--model_review",
         type=str,
-        default=env_str("AI_SCIENTIST_MODEL_REVIEW", "gpt-5.4"),
+        default=env_str_optional("AI_SCIENTIST_MODEL_REVIEW"),
         help="Model to use for review main text and captions",
     )
     parser.add_argument(
@@ -297,6 +297,28 @@ if __name__ == "__main__":
     load_project_env()
     if args.disable_http_proxy:
         disable_http_proxy()
+
+    missing_model_vars: list[str] = []
+    if args.model_agg_plots is None:
+        missing_model_vars.append("AI_SCIENTIST_MODEL_AGG_PLOTS (or --model_agg_plots)")
+    if not args.skip_writeup:
+        if args.model_writeup is None:
+            missing_model_vars.append("AI_SCIENTIST_MODEL_WRITEUP (or --model_writeup)")
+        if args.model_citation is None:
+            missing_model_vars.append("AI_SCIENTIST_MODEL_CITATION (or --model_citation)")
+        if args.model_writeup_small is None:
+            missing_model_vars.append(
+                "AI_SCIENTIST_MODEL_WRITEUP_SMALL (or --model_writeup_small)"
+            )
+    if not args.skip_review and not args.skip_writeup:
+        if args.model_review is None:
+            missing_model_vars.append("AI_SCIENTIST_MODEL_REVIEW (or --model_review)")
+    if missing_model_vars:
+        joined = "\n- ".join(missing_model_vars)
+        raise RuntimeError(
+            "Missing required model configuration. Set these in your .env file:\n"
+            f"- {joined}"
+        )
     os.environ["AI_SCIENTIST_ROOT"] = os.path.dirname(os.path.abspath(__file__))
     print(f"Set AI_SCIENTIST_ROOT to {os.environ['AI_SCIENTIST_ROOT']}")
 

@@ -84,7 +84,7 @@ from ai_scientist.reliable.outsider_audit import (
     save_outsider_audit,
     validate_outsider_audit,
 )
-from ai_scientist.env_utils import env_bool, env_str
+from ai_scientist.env_utils import env_bool, env_str, env_str_optional
 
 
 def remove_accents_and_clean(s):
@@ -585,13 +585,22 @@ def perform_writeup(
     base_folder,
     no_writing=False,
     num_cite_rounds=20,
-    small_model="deepseek-chat",
-    big_model="deepseek-chat",
+    small_model: str | None = None,
+    big_model: str | None = None,
     n_writeup_reflections=3,
     page_limit=8,
     symbolic_facts: bool = False,
     remediation_context: dict[str, object] | None = None,
 ):
+    if small_model is None:
+        small_model = env_str_optional("AI_SCIENTIST_MODEL_WRITEUP_SMALL")
+    if big_model is None:
+        big_model = env_str_optional("AI_SCIENTIST_MODEL_WRITEUP")
+    if small_model is None or big_model is None:
+        raise RuntimeError(
+            "Missing writeup model configuration. Set these in your .env file "
+            "(or pass explicit arguments): AI_SCIENTIST_MODEL_WRITEUP_SMALL, AI_SCIENTIST_MODEL_WRITEUP."
+        )
     compile_attempt = 0
     base_pdf_file = osp.join(base_folder, f"{osp.basename(base_folder)}")
     latex_folder = osp.join(base_folder, "latex")
@@ -1197,7 +1206,7 @@ chktex results:
 
 
 if __name__ == "__main__":
-    from ai_scientist.env_utils import env_int, env_str, load_env
+    from ai_scientist.env_utils import env_int, env_str_optional, load_env
 
     load_env()
     parser = argparse.ArgumentParser(description="Perform writeup for a project")
@@ -1211,13 +1220,16 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=str,
-        default=env_str("AI_SCIENTIST_MODEL_CITATION", "deepseek-chat"),
-        help="Model to use for citation collection (small model). Supports arbitrary OpenAI-compatible model names.",
+        default=env_str_optional("AI_SCIENTIST_MODEL_WRITEUP_SMALL"),
+        help=(
+            "Model to use for writeup support steps (includes citation collection in normal mode). "
+            "Supports arbitrary OpenAI-compatible model names."
+        ),
     )
     parser.add_argument(
         "--big-model",
         type=str,
-        default=env_str("AI_SCIENTIST_MODEL_WRITEUP", "deepseek-chat"),
+        default=env_str_optional("AI_SCIENTIST_MODEL_WRITEUP"),
         help="Model to use for final writeup (big model). Supports arbitrary OpenAI-compatible model names.",
     )
     parser.add_argument(
@@ -1233,6 +1245,11 @@ if __name__ == "__main__":
         help="Target page limit for the main paper (excluding references, impact statement, etc.)",
     )
     args = parser.parse_args()
+    if args.model is None or args.big_model is None:
+        raise RuntimeError(
+            "Missing writeup model configuration. Set AI_SCIENTIST_MODEL_WRITEUP_SMALL and "
+            "AI_SCIENTIST_MODEL_WRITEUP in your .env file (or pass --model/--big-model)."
+        )
 
     try:
         success = perform_writeup(

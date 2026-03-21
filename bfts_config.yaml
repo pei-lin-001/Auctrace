@@ -16,10 +16,36 @@ exp_name: run # a random experiment name will be generated if not provided
 
 # settings for code execution
 exec:
-  backend: ${oc.env:AI_SCIENTIST_EXEC_BACKEND,vast}
+  backend: ${oc.env:AI_SCIENTIST_EXEC_BACKEND}
   timeout: ${oc.env:AI_SCIENTIST_EXEC_TIMEOUT,3600}
   agent_file_name: runfile.py
   format_tb_ipython: False
+  wsl_ssh:
+    host: ${oc.env:AI_SCIENTIST_WSL_SSH_HOST,null}
+    port: ${oc.env:AI_SCIENTIST_WSL_SSH_PORT,22}
+    user: ${oc.env:AI_SCIENTIST_WSL_SSH_USER,null}
+    private_key_path_env: AI_SCIENTIST_WSL_SSH_PRIVATE_KEY_PATH
+    password_env: AI_SCIENTIST_WSL_SSH_PASSWORD
+    host_candidates_env: AI_SCIENTIST_WSL_SSH_HOST_CANDIDATES
+    connect_timeout: ${oc.env:AI_SCIENTIST_WSL_SSH_CONNECT_TIMEOUT,30}
+    command_timeout: ${oc.env:AI_SCIENTIST_WSL_SSH_COMMAND_TIMEOUT,1800}
+    readiness_timeout: ${oc.env:AI_SCIENTIST_WSL_SSH_READINESS_TIMEOUT,120}
+    setup_timeout: ${oc.env:AI_SCIENTIST_WSL_SSH_SETUP_TIMEOUT,1800}
+    wsl_distro: ${oc.env:AI_SCIENTIST_WSL_DISTRO,Ubuntu}
+    remote_root: ${oc.env:AI_SCIENTIST_WSL_REMOTE_ROOT,null}
+    venv_path: ${oc.env:AI_SCIENTIST_WSL_VENV_PATH,null}
+    windows_stage_dir_name: ${oc.env:AI_SCIENTIST_WSL_STAGE_DIR,auctrace-stage}
+    install_project_requirements: ${oc.env:AI_SCIENTIST_WSL_INSTALL_PROJECT_REQUIREMENTS,true}
+    requirements_file: requirements.txt
+    pip_install_timeout: ${oc.env:AI_SCIENTIST_WSL_PIP_INSTALL_TIMEOUT,1800}
+    cleanup_remote_workspace: ${oc.env:AI_SCIENTIST_WSL_CLEANUP_REMOTE_WORKSPACE,true}
+    cleanup_stage_archive: ${oc.env:AI_SCIENTIST_WSL_CLEANUP_STAGE_ARCHIVE,true}
+    max_archive_mb: ${oc.env:AI_SCIENTIST_WSL_MAX_ARCHIVE_MB,1024}
+    min_free_disk_gb: ${oc.env:AI_SCIENTIST_WSL_MIN_FREE_DISK_GB,50}
+    min_free_memory_gb: ${oc.env:AI_SCIENTIST_WSL_MIN_FREE_MEMORY_GB,4}
+    recommended_workers: ${oc.env:AI_SCIENTIST_WSL_RECOMMENDED_WORKERS,1}
+    auto_install_missing_packages: ${oc.env:AI_SCIENTIST_WSL_AUTO_INSTALL_MISSING_PACKAGES,true}
+    max_auto_dependency_installs: ${oc.env:AI_SCIENTIST_WSL_MAX_AUTO_DEPENDENCY_INSTALLS,3}
   vast:
     api_key_env: VAST_API_KEY
     private_ssh_key_path_env: VAST_SSH_PRIVATE_KEY_PATH
@@ -61,8 +87,8 @@ exec:
 generate_report: True
 # LLM settings for final report from journal
 report:
-  model: ${oc.env:AI_SCIENTIST_MODEL_REPORT,openai/gpt-oss-120b}
-  fallback_model: null
+  model: ${oc.env:AI_SCIENTIST_MODEL_REPORT}
+  fallback_model: ${oc.env:AI_SCIENTIST_MODEL_REPORT_FALLBACK,null}
   temp: 1.0
 
 experiment:
@@ -93,21 +119,21 @@ agent:
 
   # LLM settings for coding ??? strongest coding model
   code:
-    model: ${oc.env:AI_SCIENTIST_MODEL_CODE,openai/gpt-oss-120b}
-    fallback_model: null
+    model: ${oc.env:AI_SCIENTIST_MODEL_CODE}
+    fallback_model: ${oc.env:AI_SCIENTIST_MODEL_CODE_FALLBACK,null}
     temp: 1.0
     max_tokens: 12000
 
   # LLM settings for evaluating program output / tracebacks
   feedback:
-    model: ${oc.env:AI_SCIENTIST_MODEL_FEEDBACK,gpt-5.4}
-    fallback_model: null
+    model: ${oc.env:AI_SCIENTIST_MODEL_FEEDBACK}
+    fallback_model: ${oc.env:AI_SCIENTIST_MODEL_FEEDBACK_FALLBACK,null}
     temp: 0.5
     max_tokens: 8192
 
   vlm_feedback:
-    model: ${oc.env:AI_SCIENTIST_MODEL_VLM_FEEDBACK,gpt-5.4}
-    fallback_model: null
+    model: ${oc.env:AI_SCIENTIST_MODEL_VLM_FEEDBACK}
+    fallback_model: ${oc.env:AI_SCIENTIST_MODEL_VLM_FEEDBACK_FALLBACK,null}
     temp: 0.5
     max_tokens: null
 
@@ -120,11 +146,11 @@ agent:
   # If not specified, the default behavior will be used.
 
   summary:
-    model: ${oc.env:AI_SCIENTIST_MODEL_SUMMARY,openai/gpt-oss-120b}
-    fallback_model: null
+    model: ${oc.env:AI_SCIENTIST_MODEL_SUMMARY}
+    fallback_model: ${oc.env:AI_SCIENTIST_MODEL_SUMMARY_FALLBACK,null}
     temp: 0.3
 
   select_node:
-    model: ${oc.env:AI_SCIENTIST_MODEL_SELECT_NODE,gpt-5.4}
-    fallback_model: null
+    model: ${oc.env:AI_SCIENTIST_MODEL_SELECT_NODE}
+    fallback_model: ${oc.env:AI_SCIENTIST_MODEL_SELECT_NODE_FALLBACK,null}
     temp: 0.3

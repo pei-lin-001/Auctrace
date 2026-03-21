@@ -21,6 +21,14 @@ def env_str(key: str, default: str) -> str:
     return value if value else default
 
 
+def env_str_optional(key: str) -> str | None:
+    raw = os.getenv(key)
+    if raw is None:
+        return None
+    value = raw.strip()
+    return value if value else None
+
+
 def env_int(key: str, default: int) -> int:
     raw = os.getenv(key)
     if raw is None or not raw.strip():
@@ -43,4 +51,3 @@ def env_bool(key: str, default: bool) -> bool:
     raise RuntimeError(
         f"{key} must be a boolean (one of: {sorted(_TRUE_VALUES | _FALSE_VALUES)}), got: {raw!r}"
     )
-
