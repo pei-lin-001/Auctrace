@@ -275,6 +275,9 @@ Your research idea:\n\n
         """Create a ParallelAgent configured for the given stage"""
         stage_cfg = self.cfg.copy()
         stage_cfg.agent.search.num_drafts = stage.num_drafts
+        # Share execution backend settings across stage copies so runtime
+        # initialization (e.g., WSL SSH probe/setup) is cached for the whole run.
+        stage_cfg.exec = self.cfg.exec
         task_desc = self._curate_task_desc(stage)
 
         (
