@@ -24,6 +24,7 @@ from .outsider_audit import (
     build_outsider_audit_context_pack,
     build_outsider_audit_inputs,
     generate_outsider_audit,
+    raise_if_blocking_audit_issues,
     save_outsider_audit,
     validate_outsider_audit,
 )
@@ -123,12 +124,18 @@ def _run_claim_and_audit_pipeline(
         return
     audit_model_name = env_str("AI_SCIENTIST_MODEL_OUTSIDER_AUDIT", small_model)
     audit_client, audit_model = create_client(audit_model_name)
+    rendered_tex_path = osp.join(latex_folder, "template.rendered.tex")
+    rendered_tex: str | None = None
+    if osp.exists(rendered_tex_path):
+        with open(rendered_tex_path, "r", encoding="utf-8") as f:
+            rendered_tex = f.read()
     audit_inputs = build_outsider_audit_inputs(
         symbolic_tex=symbolic_tex,
         used_facts=used_facts,
         store=store,
         claim_ledger=ledger,
         artifact_manifest_summary=artifact_manifest_summary(manifest),
+        rendered_tex=rendered_tex,
     )
     save_context_pack(
         osp.join(latex_folder, "audit_context_pack.json"),
@@ -141,6 +148,11 @@ def _run_claim_and_audit_pipeline(
     )
     validate_outsider_audit(audit)
     save_outsider_audit(osp.join(latex_folder, "outsider_audit.json"), audit)
+    # Default to audit-as-evidence instead of audit-as-hard-block.
+    # The outsider audit is itself LLM-generated, so treating every high-severity
+    # contradiction as fatal is too brittle for the main writeup pipeline.
+    if env_bool("AI_SCIENTIST_BLOCK_ON_OUTSIDER_AUDIT", False):
+        raise_if_blocking_audit_issues(audit)
 
 
 def perform_symbolic_postprocess_retry(

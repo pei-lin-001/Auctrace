@@ -1,7 +1,7 @@
 from .backend import query
 from .journal import Journal
 from .utils.config import StageConfig
-from ai_scientist.openai_compatible import max_output_token_limit
+from ai_scientist.llm.client import max_output_token_limit
 
 
 def journal2report(journal: Journal, task_desc: dict, rcfg: StageConfig):

@@ -81,7 +81,6 @@ class ExecConfig:
     timeout: int
     agent_file_name: str
     format_tb_ipython: bool
-    vast: Optional[dict[str, Any]] = None
     wsl_ssh: Optional[dict[str, Any]] = None
 
 

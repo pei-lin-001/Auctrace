@@ -1,44 +1,74 @@
 <div align="center">
-  <a href="https://github.com/SakanaAI/AI-Scientist_v2/blob/main/docs/logo_v1.jpg">
-    <img src="docs/logo_v1.png" width="215" alt="AI Scientist v2 Logo" />
-  </a>
   <h1>
-    <b>The AI Scientist-v2: Workshop-Level Automated</b><br>
-    <b>Scientific Discovery via Agentic Tree Search</b>
+    <b>Auctrace: Trustworthy Automated Scientific Research</b>
   </h1>
+  <p><i>可信、可审计、有韧性的自动化科研系统</i></p>
 </div>
 
 <p align="center">
-  📚 <a href="https://pub.sakana.ai/ai-scientist-v2/paper">[Paper]</a> |
-  📝 <a href="https://sakana.ai/ai-scientist-first-publication/"> [Blog Post]</a> |
-  📂 <a href="https://github.com/SakanaAI/AI-Scientist-ICLR2025-Workshop-Experiment"> [ICLR2025 Workshop Experiment]</a>
+  🏗️ Based on <a href="https://github.com/SakanaAI/AI-Scientist_v2">AI Scientist-v2</a> |
+  � <a href="https://pub.sakana.ai/ai-scientist-v2/paper">[Original Paper]</a>
 </p>
 
-Fully autonomous scientific research systems are becoming increasingly capable, with AI playing a pivotal role in transforming how scientific discoveries are made.
-We are excited to introduce The AI Scientist-v2, a generalized end-to-end agentic system that has generated the first workshop paper written entirely by AI and accepted through peer review.
+---
 
-This system autonomously generates hypotheses, runs experiments, analyzes data, and writes scientific manuscripts. Unlike [its predecessor (AI Scientist-v1)](https://github.com/SakanaAI/AI-Scientist), the AI Scientist-v2 removes reliance on human-authored templates, generalizes across Machine Learning (ML) domains, and employs a progressive agentic tree search, guided by an experiment manager agent.
+**Auctrace** 是基于 [AI Scientist-v2](https://github.com/SakanaAI/AI-Scientist_v2) 的增强版本，专注于解决自动化科研系统中的**可信性问题**。
 
-> **Note:**
-> The AI Scientist-v2 doesn’t necessarily produce better papers than v1, especially when a strong starting template is available. v1 follows well-defined templates, leading to high success rates, while v2 takes a broader, more exploratory approach with lower success rates. v1 works best for tasks with clear objectives and a solid foundation, whereas v2 is designed for open-ended scientific exploration.
+当前由 LLM 驱动的自动化科研系统虽然能够完成 `idea → experiment → writeup → review` 的闭环并生成论文草稿，但论文内容的真实性仍存在根本缺陷：
+
+- 幻觉内容可能进入论文文本
+- 数字、图表和结论可能脱节
+- 研究主张往往缺乏可追溯的证据绑定
+- 失败实验和不稳定结果容易被错误解释
+
+**Auctrace 的目标**：让自动化科研系统产出的论文内容更真实、更可核验、更可信——从"能生成"转向"能被相信"。
 
 > **Caution!**
-> This codebase will execute Large Language Model (LLM)-written code. There are various risks and challenges associated with this autonomy, including the potential use of dangerous packages, uncontrolled web access, and the possibility of spawning unintended processes. Ensure that you run this within a controlled sandbox environment (e.g., a Docker container). Use at your own discretion.
+> 此代码库将执行由大语言模型（LLM）编写的代码。这种自主性存在各种风险和挑战，包括可能使用危险软件包、不受控制的网络访问以及产生意外进程的可能性。请确保在受控的沙盒环境（如 Docker 容器）中运行。请自行斟酌使用。
 
 ## Table of Contents
 
-1.  [Requirements](#requirements)
+1.  [核心特性](#核心特性)
+2.  [Requirements](#requirements)
     *   [Installation](#installation)
     *   [Supported Models and API Keys](#supported-models-and-api-keys)
-2.  [Generate Research Ideas](#generate-research-ideas)
-3.  [Run AI Scientist-v2 Paper Generation Experiments](#run-ai-scientist-v2-paper-generation-experiments)
-4.  [Citing The AI Scientist-v2](#citing-the-ai-scientist-v2)
-5.  [Frequently Asked Questions](#frequently-asked-questions)
-6.  [Acknowledgement](#acknowledgement)
+3.  [Generate Research Ideas](#generate-research-ideas)
+4.  [Run Experiments](#run-experiments)
+5.  [Execution Backends](#execution-backends)
+    *   [Local GPU](#local-gpu)
+    *   [WSL SSH](#wsl-ssh)
+6.  [Reliability Modules](#reliability-modules)
+7.  [Project Structure](#project-structure)
+8.  [Acknowledgement](#acknowledgement)
+9.  [License](#license)
+
+## 核心特性
+
+Auctrace 在 AI Scientist-v2 基础上新增以下可信性增强模块：
+
+### 符号事实锚定 (Symbolic Fact Anchoring)
+
+- **FactStore**：结构化事实变量库，统一管理实验结果数字
+- **Symbolic LaTeX**：论文写作使用 `\fact{KEY}` 占位符，渲染器确定性填充
+- **Claim Ledger**：研究主张与证据的双向追溯链路
+
+### 分级门禁机制 (Budgeted Gates)
+
+- **Gate A-E**：从实验产物入库到旁观者审计的五层检查
+- **确定性校验优先**：schema、引用键、变量解析等低成本检查
+- **旁观者审计**：薄上下文输入，避免被错误叙事链路污染
+
+### 评测协议 (MAC Framework)
+
+- **Numeric Integrity**：NCS（数值主张健全性）、NIA（数值一致性）
+- **Claim Traceability**：CEB（主张证据绑定）、PTC（来源可追溯性）
+- **Auditability**：ICS（内部一致性）、GPC（门禁覆盖率）
+
+---
 
 ## Requirements
 
-This code is designed to run on Linux with NVIDIA GPUs using CUDA and PyTorch.
+此代码设计在 Linux 环境下运行，需要 NVIDIA GPU（CUDA）和 PyTorch。也支持通过 WSL SSH 进行远程执行。
 
 ### Installation
 
@@ -150,119 +180,162 @@ Before running the full AI Scientist-v2 experiment pipeline, you first use the `
 
 This ideation step guides the AI Scientist towards specific areas of interest and produces concrete research directions to be tested in the main experimental pipeline.
 
-## Run AI Scientist-v2 Paper Generation Experiments
+## Run Experiments
 
-Using the JSON file generated in the previous ideation step, you can now launch the main AI Scientist-v2 pipeline. This involves running experiments via agentic tree search, analyzing results, and generating a paper draft.
-
-Specify the models used for the write-up and review phases via command-line arguments.
-The configuration for the best-first tree search (BFTS) is located in `bfts_config.yaml`. Adjust parameters in this file as needed.
-
-All OpenAI-style stages in this repository now accept arbitrary model strings when `OPENAI_BASE_URL` or `OPENAI_COMPATIBLE_BASE_URL` is configured, so you are no longer limited to the previously hardcoded model list for ideation or writeup.
-
-Key tree search configuration parameters in `bfts_config.yaml`:
-
--   `agent` config:
-    -   Set `num_workers` (number of parallel exploration paths) and `steps` (maximum number of nodes to explore). For example, if `num_workers=3` and `steps=21`, the tree search will explore up to 21 nodes, expanding 3 nodes concurrently at each step.
-    -   `num_seeds`: Should generally be the same as `num_workers` if `num_workers` is less than 3. Otherwise, set `num_seeds` to 3.
-    -   Note: Other agent parameters like `k_fold_validation`, `expose_prediction`, and `data_preview` are not used in the current version.
--   `search` config:
-    -   `max_debug_depth`: The maximum number of times the agent will attempt to debug a failing node before abandoning that search path.
-    -   `debug_prob`: The probability of attempting to debug a failing node.
-    -   `num_drafts`: The number of initial root nodes (i.e., the number of independent trees to grow) during Stage 1.
-
-Example command to run AI-Scientist-v2 using a generated idea file (e.g., `my_research_topic.json`). Please review `bfts_config.yaml` for detailed tree search parameters. Do not set `load_code` if you do not want to initialize experimentation with a code snippet.
+使用生成的 idea JSON 文件启动完整的实验管线：
 
 ```bash
 python launch_scientist_bfts.py \
- --load_ideas "ai_scientist/ideas/my_research_topic.json" \
- --load_code \
- --add_dataset_ref \
- --model_writeup o1-preview-2024-09-12 \
- --model_citation gpt-4o-2024-11-20 \
- --model_review gpt-4o-2024-11-20 \
- --model_agg_plots o3-mini-2025-01-31 \
- --num_cite_rounds 20
+  --load_ideas "ai_scientist/ideas/my_research_topic.json" \
+  --idea_idx 0
 ```
 
-Once the initial experimental stage is complete, you will find a timestamped log folder inside the `experiments/` directory. Navigate to `experiments/"timestamp_ideaname"/logs/0-run/` within that folder to find the tree visualization file `unified_tree_viz.html`.
-After all experiment stages are complete, the writeup stage begins. The writeup stage typically takes about 20 to 30 minutes in total. Once it finishes, you should see `timestamp_ideaname.pdf` in the `timestamp_ideaname` folder.
-For this example run, all stages typically finish within several hours.
+### 关键命令行参数
 
-If a previous run already completed an earlier main stage and wrote a stage checkpoint, you can start a **new** run from the next main stage with:
+| 参数 | 说明 |
+|------|------|
+| `--load_ideas` | idea JSON 文件路径 |
+| `--idea_idx` | 选择第几个 idea（从 0 开始） |
+| `--load_code` | 使用初始代码模板启动实验 |
+| `--add_dataset_ref` | 添加数据集引用 |
+| `--writeup-symbolic-facts` | 启用符号事实模式（推荐） |
+| `--resume-checkpoint` | 从检查点恢复运行 |
+
+### 输出目录结构
+
+```
+experiments/<timestamp>_<idea>_attempt_<id>/
+├── logs/0-run/
+│   ├── fact_store.json          # 事实变量库
+│   ├── claim_ledger.json        # 主张追溯账本
+│   ├── outsider_audit.json      # 旁观者审计报告
+│   └── unified_tree_viz.html    # 搜索树可视化
+├── latex/
+│   ├── template.tex             # 符号 LaTeX 稿
+│   ├── template.rendered.tex    # 渲染后的数值稿
+│   └── used_facts.json         # 使用的事实键列表
+└── <timestamp>_<idea>.pdf       # 最终论文
+```
+
+### 从检查点恢复
+
+如果之前的运行在某个阶段中断，可以从检查点继续：
 
 ```bash
 python launch_scientist_bfts.py \
- --config-path ".codex-tasks/my-run/formal_bfts_config.yaml" \
- --resume-checkpoint "experiments/<previous_run>/logs/0-run/stage_2_baseline_tuning_1_first_attempt/checkpoint.pkl"
+  --resume-checkpoint "experiments/<previous_run>/logs/0-run/stage_2_baseline_tuning_1_first_attempt/checkpoint.pkl"
 ```
 
-If `--resume-checkpoint` is provided, the launcher now uses the checkpoint's saved task description as the source of truth for idea metadata. This avoids accidentally resuming `failure_budget_controller` under an unrelated `--load_ideas/--idea_idx` combination.
+## Execution Backends
 
-This does not pretend to restore the killed process in place. Instead, it loads the completed stage state, creates a fresh experiment directory, and continues from the next main stage.
+Auctrace 支持多种实验执行后端，通过 `bfts_config.yaml` 中的 `exec.backend` 配置：
 
-## Run Experiments on Vast.ai
+### Local GPU
 
-This repository now includes a **Vast.ai execution backend** for the v2 tree-search pipeline. It is intended to replace the assumption that experiments must run on the local machine's CUDA-visible GPUs.
-
-The integration uses Vast.ai's official instance APIs to:
-
-- search rentable offers,
-- create or reuse an instance,
-- attach a real local SSH public key to the rented instance,
-- verify that the instance is not only `running` but also passes a real SSH health probe,
-- execute experiment workers remotely over SSH,
-- automatically destroy the rented instance when the run finishes,
-- and replace bad or unresponsive low-cost offers instead of silently hanging forever.
-
-### Required environment variables
-
-```bash
-export VAST_API_KEY="YOUR_VAST_API_KEY"
-export VAST_SSH_PRIVATE_KEY_PATH="$HOME/.ssh/id_ed25519"
-export VAST_SSH_PUBLIC_KEY_PATH="$HOME/.ssh/id_ed25519.pub"
-```
-
-The launcher and Vast backend also read these keys from the repository-local `.env` file if present, using the same `os.environ.setdefault(...)` precedence as the OpenAI-compatible path.
-
-If the environment variables are omitted, the backend will explicitly look for a local keypair in `~/.ssh/id_ed25519(.pub)` and then `~/.ssh/id_rsa(.pub)`. Vast.ai account-side key labels alone are not enough for unattended remote execution; the backend must have access to a real local public key to attach and, unless you rely on `ssh-agent`, the matching private key for the health probe and remote execution.
-
-### Enable the backend
-
-Edit [bfts_config.yaml](./bfts_config.yaml) and set:
+默认模式，在本地 CUDA GPU 上执行实验。
 
 ```yaml
 exec:
-  backend: vast
+  backend: local
 ```
 
-Key Vast.ai options live under `exec.vast`, including:
+### WSL SSH
 
-- `existing_instance_id`: reuse an existing instance instead of auto-renting
-- `offer_id`: force a specific offer ID during debugging or deterministic testing
-- `image`: Docker image used when creating the instance
-- `runtype`: defaults to `ssh_direct`
-- `max_provision_attempts`: how many low-cost offers to try before failing
-- `instance_poll_interval`: polling interval while waiting for the instance to boot
-- `ssh_probe_*`: retries and timeouts for the explicit SSH health check
-- `search.*`: offer filtering such as `num_gpus`, `reliability_min`, and `direct_port_count_min`
-- `install_project_requirements`: whether to upload the local `requirements.txt` and install it once per remote image hash
-- `requirements_file`: local requirements file to bootstrap on the Vast instance
-- `pip_install_timeout`: timeout for the remote dependency installation step
-- `auto_install_missing_packages`: whether to catch remote `ModuleNotFoundError` / `ImportError`, install the missing package, and retry the same execution
-- `max_auto_dependency_installs`: cap on automatic dependency installs per execution attempt
-- `setup_commands`: optional one-time remote setup commands
-- `auto_destroy`: whether to destroy the instance on cleanup
+通过 SSH 连接到 WSL 远程主机执行实验。适用于 Windows + WSL 环境。
 
-### Notes
+```yaml
+exec:
+  backend: wsl_ssh
+```
 
-- The remote execution path syncs each worker workspace to the Vast.ai instance, runs the generated code remotely, then syncs artifacts back to the local `experiments/` directory.
-- By default the backend now bootstraps the remote Python environment from the repo's `requirements.txt` before the first worker runs. `setup_commands` remain available for extra system or project-specific setup.
-- The backend treats the **lowest-cost healthy** offer as the target. If an offer boots into a broken host state, never exposes a usable SSH banner, or closes SSH during key exchange, that instance is destroyed and the next low-cost offer is tried explicitly.
-- If a required Python package is still missing remotely, the Vast execution path now retries explicitly: it logs the missing module, installs the mapped pip package on the active instance, and reruns the same code. If installation fails, the error still surfaces explicitly and the run does not silently fall back to local execution.
+环境变量配置：
 
-## Citing The AI Scientist-v2
+```bash
+AI_SCIENTIST_WSL_SSH_HOST=your-wsl-host
+AI_SCIENTIST_WSL_SSH_USER=username
+AI_SCIENTIST_WSL_SSH_PASSWORD=password
+AI_SCIENTIST_WSL_REMOTE_ROOT=/home/user/auctrace
+AI_SCIENTIST_WSL_VENV_PATH=/home/user/auctrace/.venv
+```
 
-If you use **The AI Scientist-v2** in your research, please cite our work as follows:
+## Reliability Modules
+
+Auctrace 的可靠性增强模块位于 `ai_scientist/reliable/` 目录：
+
+| 模块 | 文件 | 功能 |
+|------|------|------|
+| **FactStore** | `facts.py` | 结构化事实变量库 |
+| **Fact Extraction** | `fact_extraction.py`, `extract_facts.py` | 从实验产物提取事实 |
+| **Claim Ledger** | `claim_ledger.py` | 主张-证据追溯账本 |
+| **Symbolic Postprocess** | `symbolic_postprocess.py` | 符号稿渲染与修复 |
+| **Gates** | `gates.py` | 分级门禁检查 |
+| **Numeric Lint** | `numeric_lint.py` | 裸数字检测 |
+| **Outsider Audit** | `outsider_audit.py` | 旁观者审计 |
+| **Remediation** | `remediation.py` | 写稿失败修复循环 |
+| **Context Pack** | `context_pack.py` | 分层上下文打包 |
+
+### 环境变量开关
+
+| 变量 | 默认值 | 作用 |
+|------|--------|------|
+| `AI_SCIENTIST_WRITEUP_SYMBOLIC_FACTS` | `1` | 启用符号事实模式 |
+| `AI_SCIENTIST_SKIP_NUMERIC_LINT` | `0` | 跳过数字 lint |
+| `AI_SCIENTIST_SKIP_CLAIM_LEDGER` | `0` | 跳过 Claim Ledger |
+| `AI_SCIENTIST_OUTSIDER_AUDIT` | `1` | 启用旁观者审计 |
+| `AI_SCIENTIST_NUMERIC_BACKANCHOR` | `0` | 数值反向锚定 |
+
+---
+
+## Project Structure
+
+```
+auctrace/
+├── launch_scientist_bfts.py    # 主入口脚本
+├── bfts_config.yaml            # BFTS 配置
+├── requirements.txt            # Python 依赖
+├── .env                        # 环境变量配置
+│
+├── ai_scientist/
+│   ├── llm/                    # LLM 调用层
+│   │   ├── client.py           # 客户端创建与路由选择
+│   │   ├── completion.py       # 请求执行与重试
+│   │   ├── models.py           # 模型能力声明
+│   │   └── ...
+│   │
+│   ├── treesearch/             # BFTS 树搜索核心
+│   │   ├── agent_manager.py    # 四阶段实验管理
+│   │   ├── node.py             # 搜索节点
+│   │   └── ...
+│   │
+│   ├── reliable/               # 可靠性增强模块
+│   │   ├── facts.py            # FactStore
+│   │   ├── claim_ledger.py     # Claim Ledger
+│   │   ├── gates.py            # 分级门禁
+│   │   └── ...
+│   │
+│   ├── perform_ideation_temp_free.py  # Idea 生成
+│   ├── perform_writeup.py      # 论文写作
+│   ├── perform_llm_review.py   # LLM 审稿
+│   └── perform_vlm_review.py   # VLM 审稿
+│
+├── build/                      # 项目规划文档
+│   ├── 项目目标.md
+│   ├── 四大研究问题.md
+│   └── ...
+│
+└── experiments/                # 实验输出目录
+```
+
+---
+
+## Acknowledgement
+
+本项目基于以下开源项目构建：
+
+- **[AI Scientist-v2](https://github.com/SakanaAI/AI-Scientist_v2)** - Sakana AI 的自动化科研系统
+- **[AIDE](https://github.com/WecoAI/aideml)** - 树搜索实验框架
+
+如果使用本项目，请同时引用 AI Scientist-v2：
 
 ```bibtex
 @article{aiscientist_v2,
@@ -273,42 +346,12 @@ If you use **The AI Scientist-v2** in your research, please cite our work as fol
 }
 ```
 
-## Frequently Asked Questions
+---
 
-**Why wasn't a PDF or a review generated for my experiment?**
+## License
 
-The AI Scientist-v2 completes experiments with a success rate that depends on the chosen foundation model, and the complexity of the idea. Higher success rates are generally observed when using powerful models like Claude 3.5 Sonnet for the experimentation phase.
+本项目继承 AI Scientist-v2 的许可证：**The AI Scientist Source Code License**（基于 Responsible AI License）。
 
-**What is the estimated cost per experiment?**
+**强制披露**：使用本代码生成的任何科学论文或手稿，必须明确披露 AI 的使用。建议在论文的 Abstract 或 Methods 部分添加：
 
-The ideation step cost depends on the LLM used and the number of generations/reflections, but is generally low (a few dollars). For the main experiment pipeline, using Claude 3.5 Sonnet for the experimentation phase typically costs around $15–$20 per run. The subsequent writing phase adds approximately $5 when using the default models specified in the example command. Using GPT-4o for `model_citation` is recommended as it can help reduce writing costs.
-
-**How do I run The AI Scientist-v2 for different subject fields?**
-
-First, perform the [Generate Research Ideas](#generate-research-ideas) step. Create a new Markdown file describing your desired subject field or topic, following the structure of the example `ai_scientist/ideas/i_cant_believe_its_not_better.md`. Run the `perform_ideation_temp_free.py` script with this file to generate a corresponding JSON idea file. Then, proceed to the [Run AI Scientist-v2 Paper Generation Experiments](#run-ai-scientist-v2-paper-generation-experiments) step, using this JSON file with the `launch_scientist_bfts.py` script via the `--load_ideas` argument.
-
-**What should I do if I have problems accessing the Semantic Scholar API?**
-
-The Semantic Scholar API is used to assess the novelty of generated ideas and to gather citations during the paper write-up phase. If you don't have an API key, encounter rate limits, you may be able to skip these phases.
-
-**I encountered a "CUDA Out of Memory" error. What can I do?**
-
-This error typically occurs when the AI Scientist-v2 attempts to load or run a model that requires more GPU memory than available on your system. To resolve this, you can try updating your ideation prompt file (`ai_scientist/ideas/my_research_topic.md`) to suggest using smaller models for the experiments.
-
-## Acknowledgement
-
-The tree search component implemented within the `ai_scientist` directory is built on top of the [AIDE](https://github.com/WecoAI/aideml) project. We thank the AIDE developers for their valuable contributions and for making their work publicly available.
-
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=SakanaAI/AI-Scientist-v2&type=Date)](https://star-history.com/#SakanaAI/AI-Scientist-v2&Date)
-
-## ⚖️ License & Responsible Use
-
-This project is licensed under **The AI Scientist Source Code License** (a derivative of the Responsible AI License). 
-
-**Mandatory Disclosure:** By using this code, you are legally bound to clearly and prominently disclose the use of AI in any resulting scientific manuscripts or papers. 
-
-We recommend the following attribution in your paper's Abstract or Methods section:
-> "This manuscript was autonomously generated using [The AI Scientist](https://github.com/SakanaAI/AI-Scientist)."
+> "This manuscript was generated using [Auctrace](https://github.com/your-repo/auctrace), based on [The AI Scientist](https://github.com/SakanaAI/AI-Scientist)."

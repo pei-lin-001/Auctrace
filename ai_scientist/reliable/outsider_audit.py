@@ -91,14 +91,17 @@ def build_outsider_audit_inputs(
     store: FactStore,
     claim_ledger: Mapping[str, Any],
     artifact_manifest_summary: Mapping[str, Any] | None = None,
+    rendered_tex: str | None = None,
     max_excerpt_chars: int = 8000,
 ) -> OutsiderAuditInputs:
     used_keys = used_facts.get("used_keys") if isinstance(used_facts, Mapping) else None
     used_keys = used_keys if isinstance(used_keys, list) else []
     used_keys = [str(k).strip() for k in used_keys if str(k).strip()]
 
-    abstract = _extract_abstract(symbolic_tex)
-    experiments = _extract_section(symbolic_tex, "Experiments")
+    # Prefer rendered tex (with real numbers) for the audit excerpt when available.
+    excerpt_source = rendered_tex if rendered_tex is not None else symbolic_tex
+    abstract = _extract_abstract(excerpt_source)
+    experiments = _extract_section(excerpt_source, "Experiments")
     excerpt_parts = []
     if abstract:
         excerpt_parts.append("\\begin{abstract}\n" + abstract + "\n\\end{abstract}")
@@ -291,6 +294,30 @@ def validate_outsider_audit(audit: Mapping[str, Any]) -> None:
             raise OutsiderAuditError(
                 f"outsider_audit.issues[{idx}].suggested_fix is required."
             )
+
+
+def raise_if_blocking_audit_issues(audit: Mapping[str, Any]) -> None:
+    """Raise OutsiderAuditError if any high-severity contradiction was found.
+
+    Only 'high' + 'contradiction' issues are treated as hard blockers; other
+    severities are logged by the caller but do not abort the pipeline.
+    """
+    issues = audit.get("issues") or []
+    blocking = [
+        item for item in issues
+        if isinstance(item, Mapping)
+        and str(item.get("severity", "")).strip() == "high"
+        and str(item.get("category", "")).strip() == "contradiction"
+    ]
+    if not blocking:
+        return
+    summaries = "; ".join(
+        str(item.get("description", item.get("issue_id", "?")))[:120]
+        for item in blocking
+    )
+    raise OutsiderAuditError(
+        f"{len(blocking)} blocking audit issue(s) (high-severity contradiction): {summaries}"
+    )
 
 
 def save_outsider_audit(path: str, audit: Mapping[str, Any]) -> None:

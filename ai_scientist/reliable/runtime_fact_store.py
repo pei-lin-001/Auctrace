@@ -8,8 +8,8 @@ from ai_scientist.treesearch.journal import Journal, Node
 
 from .fact_extraction import (
     NodeMetricProvenance,
+    build_ablation_fact_prefix,
     extract_facts_from_metric_payload,
-    normalize_key_part,
 )
 from .facts import FactStore
 
@@ -148,8 +148,7 @@ def update_fact_store_for_stage(
     elif main_stage == 4:
         best_by_ablation = _pick_best_per_ablation(_iter_ablation_nodes(journal))
         for ablation_name, node in best_by_ablation.items():
-            ablation_part = normalize_key_part(ablation_name)
-            prefix = f"stage4.ablation.{ablation_part}"
+            prefix = build_ablation_fact_prefix(ablation_name)
             metric_payload = _metric_payload_from_node(node)
             prov = NodeMetricProvenance(
                 stage_name=stage_name,

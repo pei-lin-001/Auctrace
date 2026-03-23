@@ -31,15 +31,28 @@ class FactRecord:
     value: JsonValue
     format: str | None = None
     provenance: Dict[str, Any] = field(default_factory=dict)
+    unit: str | None = None
+    ci_lower: float | None = None
+    ci_upper: float | None = None
+    short_alias: str | None = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d: Dict[str, Any] = {
             "key": self.key,
             "meaning": self.meaning,
             "value": self.value,
             "format": self.format,
             "provenance": dict(self.provenance),
         }
+        if self.unit is not None:
+            d["unit"] = self.unit
+        if self.ci_lower is not None:
+            d["ci_lower"] = self.ci_lower
+        if self.ci_upper is not None:
+            d["ci_upper"] = self.ci_upper
+        if self.short_alias is not None:
+            d["short_alias"] = self.short_alias
+        return d
 
     @staticmethod
     def from_dict(data: Mapping[str, Any]) -> "FactRecord":
@@ -59,12 +72,24 @@ class FactRecord:
             raise FactStoreFormatError(
                 f"FactRecord.provenance must be a mapping, got: {type(provenance)}"
             )
+        unit = data.get("unit")
+        unit = None if unit is None else str(unit)
+        ci_lower_raw = data.get("ci_lower")
+        ci_lower = float(ci_lower_raw) if ci_lower_raw is not None else None
+        ci_upper_raw = data.get("ci_upper")
+        ci_upper = float(ci_upper_raw) if ci_upper_raw is not None else None
+        short_alias = data.get("short_alias")
+        short_alias = None if short_alias is None else str(short_alias)
         return FactRecord(
             key=key,
             meaning=meaning,
             value=value,
             format=fmt,
             provenance=dict(provenance),
+            unit=unit,
+            ci_lower=ci_lower,
+            ci_upper=ci_upper,
+            short_alias=short_alias,
         )
 
 
@@ -154,6 +179,23 @@ def format_fact_value_for_latex(record: FactRecord) -> str:
     return _escape_latex_text(rendered)
 
 
+def format_fact_ci_for_latex(record: FactRecord) -> str:
+    """Render a 95% CI as '(lo, hi)' for \\factci{KEY}. Returns '' if no CI stored."""
+    if record.ci_lower is None or record.ci_upper is None:
+        return ""
+    lo = _apply_simple_format(record.ci_lower, record.format) if record.format else f"{record.ci_lower:.4f}"
+    hi = _apply_simple_format(record.ci_upper, record.format) if record.format else f"{record.ci_upper:.4f}"
+    return _escape_latex_text(f"({lo}, {hi})")
+
+
+def format_fact_with_unit_for_latex(record: FactRecord) -> str:
+    """Render value with unit appended for \\factunit{KEY}."""
+    base = format_fact_value_for_latex(record)
+    if record.unit:
+        return base + "~" + _escape_latex_text(record.unit)
+    return base
+
+
 def _apply_simple_format(value: JsonValue, fmt: str) -> str:
     # Supported:
     # - "float:N" -> N decimal places
@@ -187,14 +229,25 @@ def _escape_latex_text(text: str) -> str:
 def facts_index_for_prompt(store: FactStore) -> str:
     """Produce a compact index of fact keys for LLM prompting.
 
-    Values are intentionally omitted to prevent LLM from copying numbers.
+    Values are intentionally omitted to prevent the LLM from copying numbers.
+    Alias, unit, and CI hints are shown so the LLM knows which macros to use.
     """
 
     lines: list[str] = []
     for key in sorted(store.facts.keys()):
         rec = store.facts[key]
         meaning = rec.meaning.strip().replace("\n", " ")
-        lines.append(f"- {key}: {meaning}")
+        line = f"- {key}: {meaning}"
+        hints: list[str] = []
+        if rec.short_alias:
+            hints.append(f"alias={rec.short_alias}")
+        if rec.unit:
+            hints.append(f"unit={rec.unit}")
+        if rec.ci_lower is not None and rec.ci_upper is not None:
+            hints.append(r"has_ci → \factci{" + key + "}")
+        if hints:
+            line += f"  [{', '.join(hints)}]"
+        lines.append(line)
     return "\n".join(lines)
 
 

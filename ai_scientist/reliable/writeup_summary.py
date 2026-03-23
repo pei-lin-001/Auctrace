@@ -6,7 +6,7 @@ import os.path as osp
 from typing import Any, Dict, Mapping, Sequence
 
 from .extract_facts import build_fact_store_for_run
-from .fact_extraction import normalize_key_part
+from .fact_extraction import build_ablation_fact_prefix
 from .facts import FactRecord, FactStore, validate_fact_key
 from .sanitize import redact_numeric_text
 
@@ -100,7 +100,7 @@ def _build_best_stage_symbolic(
 
 def _build_ablation_entry(raw_entry: Mapping[str, Any], store: FactStore) -> dict[str, Any]:
     ablation_name = str(raw_entry.get("ablation_name") or "").strip()
-    prefix = f"stage4.ablation.{normalize_key_part(ablation_name)}" if ablation_name else ""
+    prefix = build_ablation_fact_prefix(ablation_name) if ablation_name else ""
     return {
         "stage_name": str(raw_entry.get("stage_name") or "4_ablation"),
         "ablation_name": ablation_name,

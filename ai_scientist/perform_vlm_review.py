@@ -2,9 +2,6 @@ import os
 import hashlib
 import pymupdf
 import re
-import base64
-from ai_scientist.openai_compatible import max_output_token_limit
-from ai_scientist.openai_chat_completions import create_chat_completion_with_fallback
 from ai_scientist.vlm import (
     get_response_from_vlm,
     get_batch_responses_from_vlm,
@@ -12,19 +9,6 @@ from ai_scientist.vlm import (
 )
 
 from ai_scientist.perform_llm_review import load_paper
-
-
-def encode_image_to_base64(image_data):
-    """Encode image data to base64 string."""
-    if isinstance(image_data, str):
-        with open(image_data, "rb") as image_file:
-            return base64.b64encode(image_file.read()).decode("utf-8")
-    elif isinstance(image_data, list):
-        return base64.b64encode(image_data[0]).decode("utf-8")
-    elif isinstance(image_data, bytes):
-        return base64.b64encode(image_data).decode("utf-8")
-    else:
-        raise TypeError(f"Unsupported image data type: {type(image_data)}")
 
 
 reviewer_system_prompt_base = (
@@ -398,52 +382,29 @@ def detect_duplicate_figures(client, client_model, pdf_path):
         os.makedirs(img_folder_path)
     img_pairs = extract_figure_screenshots(pdf_path, img_folder_path)
 
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are an expert at identifying duplicate or highly similar images. "
-                "Please analyze these images and determine if they are duplicates or variations of the same visualization. "
-                "Response format: reasoning, followed by `Duplicate figures: <list of duplicate figure names>`."
-                "Make sure you use the exact figure names (e.g. Figure 1, Figure 2b, etc.) as they appear in the paper."
-                "If you find no duplicates, respond with `No duplicates found`."
-            ),
-        },
-        {
-            "role": "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "Are any of these images duplicates or highly similar? If so, please identify which ones are similar and explain why. Focus on content similarity, not just visual style.",
-                }
-            ],
-        },
-    ]
-
-    # Add images in the correct format
-    for img_info in img_pairs:
-        messages[1]["content"].append(
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/jpeg;base64,{encode_image_to_base64(img_info['images'][0])}"
-                },
-            }
-        )
+    system_message = (
+        "You are an expert at identifying duplicate or highly similar images. "
+        "Please analyze these images and determine if they are duplicates or variations of the same visualization. "
+        "Response format: reasoning, followed by `Duplicate figures: <list of duplicate figure names>`. "
+        "Make sure you use the exact figure names (e.g. Figure 1, Figure 2b, etc.) as they appear in the paper. "
+        "If you find no duplicates, respond with `No duplicates found`."
+    )
+    user_prompt = (
+        "Are any of these images duplicates or highly similar? If so, please identify which ones are similar and explain why. "
+        "Focus on content similarity, not just visual style."
+    )
+    image_paths = [img_info["images"][0] for img_info in img_pairs if img_info.get("images")]
 
     try:
-        response, _ = create_chat_completion_with_fallback(
+        analysis, _ = get_response_from_vlm(
+            user_prompt,
+            image_paths,
             client,
-            messages=messages,
-            model=client_model,
-            fallback_model=None,
-            request_kwargs={"max_tokens": max_output_token_limit()},
+            client_model,
+            system_message,
+            max_images=min(200, len(image_paths) or 0),
         )
-
-        analysis = response.choices[0].message.content
-
         return analysis
-
     except Exception as e:
         print(f"Error analyzing images: {e}")
         return {"error": str(e)}

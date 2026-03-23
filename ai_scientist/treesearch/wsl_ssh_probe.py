@@ -218,13 +218,22 @@ def probe_windows(auth: WslSshAuth, settings: dict[str, Any]) -> dict[str, Any]:
 
 
 def probe_wsl(auth: WslSshAuth, settings: dict[str, Any]) -> dict[str, Any]:
-    result = run_wsl_command(
-        auth,
-        PROBE_WSL_SCRIPT,
-        settings["readiness_timeout"],
-        settings["connect_timeout"],
-        settings["wsl_distro"],
-    )
+    try:
+        result = run_wsl_command(
+            auth,
+            PROBE_WSL_SCRIPT,
+            settings["readiness_timeout"],
+            settings["connect_timeout"],
+            settings["wsl_distro"],
+        )
+    except TimeoutError as exc:
+        distro = settings.get("wsl_distro") or "default"
+        raise RuntimeError(
+            "WSL probe timed out while launching the remote distro over Windows SSH. "
+            f"SSH to {auth.user}@{auth.host}:{auth.port} worked, but "
+            f"`wsl -d {distro}` did not return within {settings['readiness_timeout']}s. "
+            "This usually means the Windows host cannot start WSL from the current non-interactive SSH session."
+        ) from exc
     if result.returncode != 0:
         raise RuntimeError(f"WSL probe failed:\n{result.stdout}\n{result.stderr}")
     return load_json_object(result.stdout, "wsl")

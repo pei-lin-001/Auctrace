@@ -11,8 +11,8 @@ from ai_scientist.treesearch.utils.metric import MetricValue, WorstMetricValue
 from .facts import FactRecord, FactStore
 from .fact_extraction import (
     NodeMetricProvenance,
+    build_ablation_fact_prefix,
     extract_facts_from_metric_payload,
-    normalize_key_part,
 )
 
 
@@ -127,7 +127,7 @@ def _add_ablation_facts(*, store: FactStore, log_dir: str) -> None:
             [n for n in nodes if isinstance(n, Mapping)]
         )
         for ablation_name, node in best_by_ablation.items():
-            prefix = f"stage4.ablation.{normalize_key_part(ablation_name)}"
+            prefix = build_ablation_fact_prefix(ablation_name)
             prov = NodeMetricProvenance(
                 stage_name=stage_name,
                 node_id=str(node.get("id")) if node.get("id") else None,

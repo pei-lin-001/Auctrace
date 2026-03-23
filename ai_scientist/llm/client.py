@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 import httpx
 import openai
 
-from .project_env import load_project_env
+from ai_scientist.project_env import load_project_env
+
+from .models import ModelCapabilities, capabilities_for
 
 OPENAI_COMPATIBLE_BASE_ENV_VARS = (
     "OPENAI_COMPATIBLE_BASE_URL",
@@ -26,6 +29,7 @@ MINIMAX_REGION_ENV_VAR = "MINIMAX_REGION"
 MINIMAX_GLOBAL_BASE_URL = "https://api.minimax.io/v1"
 MINIMAX_CN_BASE_URL = "https://api.minimaxi.com/v1"
 MINIMAX_ROUTE = "minimax-openai-compatible"
+
 DEFAULT_CONTEXT_TOKENS = 128 * 1024
 CONTEXT_TOKENS_ENV_VAR = "AI_SCIENTIST_CONTEXT_TOKENS"
 DEFAULT_MAX_OUTPUT_TOKENS = 8 * 1024
@@ -33,33 +37,34 @@ MAX_OUTPUT_TOKENS_ENV_VAR = "AI_SCIENTIST_MAX_OUTPUT_TOKENS"
 
 
 @dataclass(frozen=True)
-class OpenAIClientSpec:
+class ClientSpec:
     client: openai.OpenAI
     model: str
     route: str
+    capabilities: ModelCapabilities
 
 
 _http_client_pid = None
 _http_client_cache = None
 
+
 def _build_http_client() -> httpx.Client:
     """Build httpx client with process isolation and timeout protection.
 
-    Recreates client after fork to avoid SSL connection state conflicts
-    in multi-process environments (ProcessPoolExecutor).
+    Recreates the client after fork to avoid SSL connection state conflicts in
+    multi-process environments (ProcessPoolExecutor).
     """
+
     global _http_client_pid, _http_client_cache
     current_pid = os.getpid()
-
-    # Recreate client if process ID changed (after fork)
     if _http_client_pid != current_pid:
         _http_client_cache = openai.DefaultHttpxClient(
             trust_env=False,
             timeout=httpx.Timeout(
-                connect=10.0,   # 10s connect timeout
-                read=300.0,     # 5min read timeout for long responses
-                write=10.0,     # 10s write timeout
-                pool=5.0,       # 5s pool timeout
+                connect=10.0,
+                read=300.0,
+                write=10.0,
+                pool=5.0,
             ),
             limits=httpx.Limits(
                 max_connections=10,
@@ -67,8 +72,8 @@ def _build_http_client() -> httpx.Client:
             ),
         )
         _http_client_pid = current_pid
-
     return _http_client_cache
+
 
 def _first_env(*names: str) -> str | None:
     for name in names:
@@ -102,13 +107,9 @@ def _parse_positive_int(raw_value: str | None, default: int, env_var: str) -> in
     try:
         value = int(raw_value)
     except ValueError as exc:
-        raise RuntimeError(
-            f"{env_var} must be an integer, got: {raw_value}"
-        ) from exc
+        raise RuntimeError(f"{env_var} must be an integer, got: {raw_value}") from exc
     if value <= 0:
-        raise RuntimeError(
-            f"{env_var} must be positive, got: {raw_value}"
-        )
+        raise RuntimeError(f"{env_var} must be positive, got: {raw_value}")
     return value
 
 
@@ -140,10 +141,6 @@ def openai_compatible_api_key() -> str:
     return api_key
 
 
-def has_openai_compatible_base_url() -> bool:
-    return openai_compatible_base_url() is not None
-
-
 def minimax_base_url() -> str:
     configured = _first_env(*MINIMAX_BASE_ENV_VARS)
     if configured is not None:
@@ -168,6 +165,14 @@ def has_minimax_api_key() -> bool:
     return _first_env(*MINIMAX_KEY_ENV_VARS) is not None
 
 
+def has_openai_compatible_base_url() -> bool:
+    return openai_compatible_base_url() is not None
+
+
+def normalize_openai_model_name(model: str) -> str:
+    return (model or "").strip()
+
+
 def _split_provider_prefix(model: str) -> tuple[str | None, str]:
     normalized = normalize_openai_model_name(model)
     if "/" not in normalized:
@@ -188,13 +193,27 @@ def is_minimax_model(model: str) -> bool:
     return leaf.lower().startswith("minimax-")
 
 
-def is_minimax_route(route: str) -> bool:
-    return route == MINIMAX_ROUTE
+def normalize_model_for_route(model: str, route: str) -> str:
+    normalized = normalize_openai_model_name(model)
+    provider, leaf = _split_provider_prefix(normalized)
 
+    if route == MINIMAX_ROUTE:
+        leaf = leaf.strip()
+        if leaf.lower().startswith("minimax-"):
+            suffix = leaf[len("minimax-") :]
+            if suffix.lower().startswith("m"):
+                suffix = "M" + suffix[1:]
+            return "MiniMax-" + suffix
+        return leaf
 
-def is_minimax_client(client: openai.OpenAI) -> bool:
-    base_url = str(getattr(client, "base_url", "")).lower()
-    return "api.minimax.io" in base_url or "api.minimaxi.com" in base_url
+    # IMPORTANT: do not trim/strip vendor prefix for openai-compatible routes.
+    if route == "openai-compatible":
+        return normalized
+
+    if route == "openai" and provider == OPENAI_VENDOR_PREFIX.rstrip("/"):
+        return leaf
+
+    return normalized
 
 
 def apply_minimax_request_defaults(request_kwargs: dict) -> dict:
@@ -211,39 +230,46 @@ def response_message_to_history_dict(message: object) -> dict:
     elif isinstance(message, dict):
         payload = {k: v for k, v in message.items() if v is not None}
     else:
-        raise TypeError(f"Unsupported message type for history preservation: {type(message)!r}")
+        raise TypeError(
+            f"Unsupported message type for history preservation: {type(message)!r}"
+        )
     payload.setdefault("role", "assistant")
     return payload
 
 
-def is_openai_reasoning_model(model: str) -> bool:
-    leaf = model.strip().split("/")[-1]
-    return leaf.startswith("o1") or leaf.startswith("o3")
+def tag_client(client: Any, spec: "ClientSpec") -> None:
+    """Attach route/capability metadata to an OpenAI client object (best-effort)."""
+    try:
+        setattr(client, "_ai_scientist_route", spec.route)
+        setattr(client, "_ai_scientist_capabilities", spec.capabilities)
+    except Exception:
+        return
 
 
-def normalize_openai_model_name(model: str) -> str:
-    return model.strip()
+def spec_from_client(client: Any, model: str) -> "ClientSpec":
+    """Reconstruct a ClientSpec from a tagged client, falling back to URL sniffing."""
+    route = getattr(client, "_ai_scientist_route", None)
+    capabilities = getattr(client, "_ai_scientist_capabilities", None)
+    if isinstance(route, str) and capabilities is not None:
+        return ClientSpec(client=client, model=model, route=route, capabilities=capabilities)
+
+    # Legacy fallback: infer route from base_url string.
+    base_url = str(getattr(client, "base_url", "")).lower()
+    if "api.minimax.io" in base_url or "api.minimaxi.com" in base_url:
+        route = MINIMAX_ROUTE
+    elif base_url:
+        route = "openai-compatible"
+    else:
+        route = "openai"
+    return ClientSpec(
+        client=client,
+        model=model,
+        route=route,
+        capabilities=capabilities_for(model, route),
+    )
 
 
-def normalize_openai_model_for_route(model: str, route: str) -> str:
-    normalized = normalize_openai_model_name(model)
-    provider, leaf = _split_provider_prefix(normalized)
-    if route == MINIMAX_ROUTE:
-        leaf = leaf.strip()
-        if leaf.lower().startswith("minimax-"):
-            suffix = leaf[len("minimax-") :]
-            if suffix.lower().startswith("m"):
-                suffix = "M" + suffix[1:]
-            return "MiniMax-" + suffix
-        return leaf
-    if route == "openai" and provider == OPENAI_VENDOR_PREFIX.rstrip("/"):
-        return leaf
-    if route == "openai-compatible" and provider == OPENAI_VENDOR_PREFIX.rstrip("/"):
-        return leaf
-    return normalized
-
-
-def create_openai_client(model: str, max_retries: int = 2) -> OpenAIClientSpec:
+def create_client_spec(model: str, max_retries: int = 3) -> ClientSpec:
     provider, _ = _split_provider_prefix(model)
     if provider == MINIMAX_VENDOR_PREFIX.rstrip("/"):
         client = openai.OpenAI(
@@ -252,10 +278,12 @@ def create_openai_client(model: str, max_retries: int = 2) -> OpenAIClientSpec:
             max_retries=max_retries,
             http_client=_build_http_client(),
         )
-        return OpenAIClientSpec(
+        normalized_model = normalize_model_for_route(model, MINIMAX_ROUTE)
+        return ClientSpec(
             client=client,
-            model=normalize_openai_model_for_route(model, MINIMAX_ROUTE),
+            model=normalized_model,
             route=MINIMAX_ROUTE,
+            capabilities=capabilities_for(normalized_model, MINIMAX_ROUTE),
         )
 
     if is_minimax_model(model) and has_minimax_api_key():
@@ -265,10 +293,12 @@ def create_openai_client(model: str, max_retries: int = 2) -> OpenAIClientSpec:
             max_retries=max_retries,
             http_client=_build_http_client(),
         )
-        return OpenAIClientSpec(
+        normalized_model = normalize_model_for_route(model, MINIMAX_ROUTE)
+        return ClientSpec(
             client=client,
-            model=normalize_openai_model_for_route(model, MINIMAX_ROUTE),
+            model=normalized_model,
             route=MINIMAX_ROUTE,
+            capabilities=capabilities_for(normalized_model, MINIMAX_ROUTE),
         )
 
     compat_base_url = openai_compatible_base_url()
@@ -279,15 +309,20 @@ def create_openai_client(model: str, max_retries: int = 2) -> OpenAIClientSpec:
             max_retries=max_retries,
             http_client=_build_http_client(),
         )
-        return OpenAIClientSpec(
+        normalized_model = normalize_model_for_route(model, "openai-compatible")
+        return ClientSpec(
             client=client,
-            model=normalize_openai_model_for_route(model, "openai-compatible"),
+            model=normalized_model,
             route="openai-compatible",
+            capabilities=capabilities_for(normalized_model, "openai-compatible"),
         )
 
     client = openai.OpenAI(max_retries=max_retries, http_client=_build_http_client())
-    return OpenAIClientSpec(
+    normalized_model = normalize_model_for_route(model, "openai")
+    return ClientSpec(
         client=client,
-        model=normalize_openai_model_for_route(model, "openai"),
+        model=normalized_model,
         route="openai",
+        capabilities=capabilities_for(normalized_model, "openai"),
     )
+

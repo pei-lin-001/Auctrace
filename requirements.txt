@@ -1,7 +1,6 @@
 # LLM APIs
 backoff
 openai
-vastai-sdk
 # Viz
 matplotlib
 pypdf

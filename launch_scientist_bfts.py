@@ -183,7 +183,7 @@ def parse_arguments():
         action="store_true",
         help=(
             "Disable HTTP proxy usage for the current process (clears *PROXY env vars and sets NO_PROXY='*'). "
-            "Leave this off if your network requires a system proxy/VPN to reach Vast.ai."
+            "Leave this off if your network requires a system proxy/VPN."
         ),
     )
     return parser.parse_args()
@@ -238,11 +238,7 @@ def describe_execution_backend(config_path="bfts_config.yaml"):
         user = wsl_cfg.get("user", "unknown")
         distro = wsl_cfg.get("wsl_distro", "WSL")
         return f"Using WSL SSH execution backend ({user}@{host}, distro={distro})"
-    if backend != "vast":
-        return f"Using GPUs: {get_available_gpus()}"
-    search_cfg = cfg.get("exec", {}).get("vast", {}).get("search", {})
-    requested = search_cfg.get("num_gpus", "unknown")
-    return f"Using Vast.ai execution backend (requested GPUs: {requested})"
+    return f"Using GPUs: {get_available_gpus()}"
 
 
 def find_pdf_path_for_review(idea_dir):

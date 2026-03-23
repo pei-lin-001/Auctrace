@@ -17,8 +17,6 @@ from ai_scientist.llm import (
     create_client,
 )
 
-from ai_scientist.utils.token_tracker import track_token_usage
-
 from ai_scientist.tools.literature_search import search_for_papers
 
 from ai_scientist.perform_vlm_review import (

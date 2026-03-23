@@ -46,43 +46,6 @@ exec:
     recommended_workers: ${oc.env:AI_SCIENTIST_WSL_RECOMMENDED_WORKERS,1}
     auto_install_missing_packages: ${oc.env:AI_SCIENTIST_WSL_AUTO_INSTALL_MISSING_PACKAGES,true}
     max_auto_dependency_installs: ${oc.env:AI_SCIENTIST_WSL_MAX_AUTO_DEPENDENCY_INSTALLS,3}
-  vast:
-    api_key_env: VAST_API_KEY
-    private_ssh_key_path_env: VAST_SSH_PRIVATE_KEY_PATH
-    public_ssh_key_path_env: VAST_SSH_PUBLIC_KEY_PATH
-    existing_instance_id: ${oc.env:AI_SCIENTIST_VAST_EXISTING_INSTANCE_ID,null}
-    offer_id: ${oc.env:AI_SCIENTIST_VAST_OFFER_ID,null}
-    auto_destroy: ${oc.env:AI_SCIENTIST_VAST_AUTO_DESTROY,true}
-    readiness_timeout: ${oc.env:AI_SCIENTIST_VAST_READINESS_TIMEOUT,900}
-    setup_timeout: ${oc.env:AI_SCIENTIST_VAST_SETUP_TIMEOUT,1800}
-    instance_poll_interval: 10
-    max_provision_attempts: 3
-    ssh_probe_retries: 6
-    ssh_probe_retry_delay: 10
-    ssh_probe_timeout: 30
-    ssh_probe_connect_timeout: 15
-    remote_root: /workspace/auctrace
-    image: pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel
-    disk_gb: 64
-    runtype: ssh_direct
-    label_prefix: auctrace
-    install_project_requirements: true
-    requirements_file: requirements.txt
-    pip_install_timeout: 1800
-    auto_install_missing_packages: true
-    max_auto_dependency_installs: 3
-    setup_commands: []
-    search:
-      limit: ${oc.env:AI_SCIENTIST_VAST_SEARCH_LIMIT,25}
-      order: ${oc.env:AI_SCIENTIST_VAST_SEARCH_ORDER,dph_total}
-      type: ${oc.env:AI_SCIENTIST_VAST_SEARCH_TYPE,on-demand}
-      verified: ${oc.env:AI_SCIENTIST_VAST_SEARCH_VERIFIED,true}
-      rentable: ${oc.env:AI_SCIENTIST_VAST_SEARCH_RENTABLE,true}
-      rented: ${oc.env:AI_SCIENTIST_VAST_SEARCH_RENTED,false}
-      num_gpus: ${oc.env:AI_SCIENTIST_VAST_SEARCH_NUM_GPUS,1}
-      reliability_min: ${oc.env:AI_SCIENTIST_VAST_SEARCH_RELIABILITY_MIN,0.95}
-      inet_up_min: ${oc.env:AI_SCIENTIST_VAST_SEARCH_INET_UP_MIN,100}
-      direct_port_count_min: ${oc.env:AI_SCIENTIST_VAST_SEARCH_DIRECT_PORT_COUNT_MIN,1}
 
 generate_report: True
 # LLM settings for final report from journal

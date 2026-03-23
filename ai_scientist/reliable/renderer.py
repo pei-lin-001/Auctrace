@@ -7,11 +7,18 @@ import re
 from typing import Any, Dict
 
 from .errors import SymbolicLatexError, UnknownFactKeyError
-from .facts import FactStore, format_fact_value_for_latex
+from .facts import FactStore, format_fact_ci_for_latex, format_fact_value_for_latex, format_fact_with_unit_for_latex
 from .params import ParamStore, format_param_value_for_latex
-from .placeholders import list_fact_keys_in_order, list_param_keys_in_order
+from .placeholders import (
+    iter_factci_placeholders,
+    iter_factunit_placeholders,
+    list_fact_keys_in_order,
+    list_param_keys_in_order,
+)
 
 _FACT_MACRO_RE = re.compile(r"\\fact\{([^{}]+)\}")
+_FACTCI_MACRO_RE = re.compile(r"\\factci\{([^{}]+)\}")
+_FACTUNIT_MACRO_RE = re.compile(r"\\factunit\{([^{}]+)\}")
 _PARAM_MACRO_RE = re.compile(r"\\param\{([^{}]+)\}")
 
 
@@ -22,6 +29,20 @@ def render_symbolic_latex(
 ) -> tuple[str, Dict[str, Any]]:
     keys = list_fact_keys_in_order(symbolic_tex)
     param_keys = list_param_keys_in_order(symbolic_tex)
+
+    # Collect extra keys from \factci{} and \factunit{} for the audit trail.
+    _seen_extra: set[str] = set(keys)
+    extra_keys: list[str] = []
+    for ph in iter_factci_placeholders(symbolic_tex):
+        if ph.key not in _seen_extra:
+            _seen_extra.add(ph.key)
+            extra_keys.append(ph.key)
+    for ph in iter_factunit_placeholders(symbolic_tex):
+        if ph.key not in _seen_extra:
+            _seen_extra.add(ph.key)
+            extra_keys.append(ph.key)
+    all_fact_keys = keys + extra_keys
+
     used: Dict[str, Any] = {
         "schema": "auctrace.used_facts.v1",
         "used_keys": [],
@@ -35,6 +56,16 @@ def render_symbolic_latex(
         record = store.get(key)  # raises UnknownFactKeyError
         return format_fact_value_for_latex(record)
 
+    def _replace_factci(match: re.Match[str]) -> str:
+        key = match.group(1).strip()
+        record = store.get(key)
+        return format_fact_ci_for_latex(record)
+
+    def _replace_factunit(match: re.Match[str]) -> str:
+        key = match.group(1).strip()
+        record = store.get(key)
+        return format_fact_with_unit_for_latex(record)
+
     def _replace_param(match: re.Match[str]) -> str:
         if param_store is None:
             raise SymbolicLatexError(
@@ -46,13 +77,15 @@ def render_symbolic_latex(
 
     try:
         rendered = _FACT_MACRO_RE.sub(_replace_fact, symbolic_tex)
+        rendered = _FACTCI_MACRO_RE.sub(_replace_factci, rendered)
+        rendered = _FACTUNIT_MACRO_RE.sub(_replace_factunit, rendered)
         rendered = _PARAM_MACRO_RE.sub(_replace_param, rendered)
     except UnknownFactKeyError:
         raise
     except Exception as e:
         raise SymbolicLatexError(f"Failed to render symbolic LaTeX: {e}") from e
 
-    for key in keys:
+    for key in all_fact_keys:
         rec = store.get(key)
         used["used_keys"].append(key)
         used["facts"].append(
@@ -79,6 +112,10 @@ def render_symbolic_latex(
     if "\\fact{" in rendered:
         # This should be impossible if regex replacement ran, but keep it explicit.
         raise SymbolicLatexError("Rendered LaTeX still contains unresolved \\fact{...} placeholders.")
+    if "\\factci{" in rendered:
+        raise SymbolicLatexError("Rendered LaTeX still contains unresolved \\factci{...} placeholders.")
+    if "\\factunit{" in rendered:
+        raise SymbolicLatexError("Rendered LaTeX still contains unresolved \\factunit{...} placeholders.")
     if "\\param{" in rendered:
         raise SymbolicLatexError("Rendered LaTeX still contains unresolved \\param{...} placeholders.")
 

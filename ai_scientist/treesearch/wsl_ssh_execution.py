@@ -9,7 +9,7 @@ from typing import Any
 
 from .dependency_resolution import extract_missing_module, package_name_for_module
 from .interpreter import ExecutionResult
-from .vast_execution import (
+from .remote_exec_common import (
     RESULT_END,
     RESULT_START,
     RUNNER_FILE,

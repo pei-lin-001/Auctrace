@@ -5,7 +5,7 @@ import tempfile
 import uuid
 from pathlib import Path, PurePosixPath
 
-from .vast_execution import create_archive, extract_archive
+from .remote_exec_common import create_archive, extract_archive
 from .wsl_ssh_client import (
     WslSshAuth,
     quote_posix_path,

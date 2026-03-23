@@ -1,6 +1,6 @@
 from . import backend_openai
 from .utils import FunctionSpec, OutputType, PromptType, compile_prompt_to_md
-from ai_scientist.openai_compatible import max_output_token_limit
+from ai_scientist.llm.client import max_output_token_limit
 
 def get_ai_client(model: str, **model_kwargs):
     """
@@ -45,27 +45,8 @@ def query(
         "model": model,
         "temperature": temperature,
         "fallback_model": fallback_model,
+        "max_tokens": max_tokens or max_output_token_limit(),
     }
-
-    # Handle models with beta limitations
-    # ref: https://platform.openai.com/docs/guides/reasoning/beta-limitations
-    if model.startswith("o1"):
-        if system_message and user_message is None:
-            user_message = system_message
-        elif system_message is None and user_message:
-            pass
-        elif system_message and user_message:
-            system_message["Main Instructions"] = {}
-            system_message["Main Instructions"] |= user_message
-            user_message = system_message
-        system_message = None
-        # model_kwargs["temperature"] = 0.5
-        model_kwargs["reasoning_effort"] = "high"
-        model_kwargs["max_completion_tokens"] = max_tokens or max_output_token_limit()
-        # remove 'temperature' from model_kwargs
-        model_kwargs.pop("temperature", None)
-    else:
-        model_kwargs["max_tokens"] = max_tokens or max_output_token_limit()
 
     output, req_time, in_tok_count, out_tok_count, info = backend_openai.query(
         system_message=compile_prompt_to_md(system_message) if system_message else None,

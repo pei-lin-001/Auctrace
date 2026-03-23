@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from .vast_common import cfg_value
+from .remote_exec_common import cfg_value
 
 DEFAULT_MAX_ARCHIVE_MB = 1024
 DEFAULT_MIN_FREE_DISK_GB = 50

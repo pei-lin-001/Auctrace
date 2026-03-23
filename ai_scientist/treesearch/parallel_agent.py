@@ -19,7 +19,6 @@ import pickle
 from dataclasses import asdict
 from omegaconf import OmegaConf
 from .execution_backends import create_interpreter
-from .vast_api import cleanup_vast_runtime, prepare_vast_runtime
 from .wsl_ssh_api import cleanup_wsl_ssh_runtime, prepare_wsl_ssh_runtime
 from .worker_failures import (
     build_retryable_llm_failure_node,
@@ -466,7 +465,13 @@ class MinimalAgent:
             prompt["Data Overview"] = self.data_preview
 
         plan, code = self.plan_and_code_query(prompt)
-        return Node(plan=plan, code=code, parent=parent_node)
+        return Node(
+            plan=plan,
+            code=code,
+            parent=parent_node,
+            ablation_name=parent_node.ablation_name,
+            hyperparam_name=parent_node.hyperparam_name,
+        )
 
     def _improve(self, parent_node: Node) -> Node:
         prompt: Any = {
@@ -492,6 +497,8 @@ class MinimalAgent:
             plan=plan,
             code=code,
             parent=parent_node,
+            ablation_name=parent_node.ablation_name,
+            hyperparam_name=parent_node.hyperparam_name,
         )
 
     def _generate_seed_node(self, parent_node: Node):
@@ -1121,15 +1128,7 @@ class ParallelAgent:
         self.data_preview = None
         self.num_workers = cfg.agent.num_workers
         self.exec_backend = getattr(cfg.exec, "backend", "local")
-        if self.exec_backend == "vast":
-            runtime = prepare_vast_runtime(self.cfg.exec, self.cfg.exp_name)
-            self.num_gpus = runtime.num_gpus
-            print(
-                f"Using Vast.ai instance {runtime.instance_id} at "
-                f"{runtime.ssh_host}:{runtime.ssh_port} with {runtime.num_gpus} GPU(s); "
-                f"offer={runtime.offer_id}, machine={runtime.machine_id}"
-            )
-        elif self.exec_backend == "wsl_ssh":
+        if self.exec_backend == "wsl_ssh":
             runtime = prepare_wsl_ssh_runtime(self.cfg.exec, self.cfg.exp_name)
             self.num_gpus = runtime.num_gpus
             self.num_workers = min(self.num_workers, runtime.recommended_workers)
@@ -2090,6 +2089,10 @@ class ParallelAgent:
             return
 
         hyperparam_name = result_node.hyperparam_name
+        current = result_node.parent if hyperparam_name is None else None
+        while hyperparam_name is None and current is not None:
+            hyperparam_name = current.hyperparam_name
+            current = current.parent
         if hyperparam_name is None:
             print(
                 f"[red]hyperparam_name is None for result_node: {result_node.id}[/red]"
@@ -2112,6 +2115,10 @@ class ParallelAgent:
             return
 
         ablation_name = result_node.ablation_name
+        current = result_node.parent if ablation_name is None else None
+        while ablation_name is None and current is not None:
+            ablation_name = current.ablation_name
+            current = current.parent
         if ablation_name is None:
             print(f"[red]ablation_name is None for result_node: {result_node.id}[/red]")
             return
@@ -2257,11 +2264,6 @@ class ParallelAgent:
             except Exception as e:
                 print(f"Error during executor shutdown: {e}")
             finally:
-                if self.exec_backend == "vast":
-                    try:
-                        cleanup_vast_runtime(self.cfg.exec)
-                    except Exception as e:
-                        print(f"Error destroying Vast.ai instance: {e}")
                 if self.exec_backend == "wsl_ssh":
                     try:
                         cleanup_wsl_ssh_runtime(self.cfg.exec)
